@@ -1527,7 +1527,7 @@ function getLockedLeaderboardName() {
 // ============================================
 
 function createLeaderboardClient() {
-  if (!window.BOUNCE_EJ_SUPABASE) {
+  if (!window.BOUNCE_EJ_SUPABASE || !window.supabase || typeof window.supabase.createClient !== "function") {
     return null;
   }
 
