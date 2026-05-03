@@ -362,7 +362,7 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   map[powerup.id] = powerup;
   return map;
 }, {});
-const leaderboardClient = createLeaderboardClient();
+let leaderboardClient = createLeaderboardClient();
 
 const authState = {
   session: null,
