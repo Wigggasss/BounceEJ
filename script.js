@@ -362,7 +362,7 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   map[powerup.id] = powerup;
   return map;
 }, {});
-const leaderboardClient = createLeaderboardClient();
+let leaderboardClient = createLeaderboardClient();
 
 const authState = {
   session: null,
@@ -1527,7 +1527,7 @@ function getLockedLeaderboardName() {
 // ============================================
 
 function createLeaderboardClient() {
-  if (!window.BOUNCE_EJ_SUPABASE) {
+  if (!window.BOUNCE_EJ_SUPABASE || !window.supabase || typeof window.supabase.createClient !== "function") {
     return null;
   }
 
