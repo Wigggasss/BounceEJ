@@ -2385,7 +2385,8 @@ function createMultiplayerState() {
     deaths: {},
     result: null,
     resultTimer: null,
-    startQueued: false
+    startQueued: false,
+    deathTickInterval: null
   };
 }
 
@@ -2599,6 +2600,11 @@ function leaveMultiplayerRoom(broadcast = true) {
 
   if (multiplayer.resultTimer) {
     clearTimeout(multiplayer.resultTimer);
+  }
+
+  if (multiplayer.deathTickInterval) {
+    clearInterval(multiplayer.deathTickInterval);
+    multiplayer.deathTickInterval = null;
   }
 
   if (channel && leaderboardClient) {
@@ -3008,6 +3014,30 @@ function handleLocalMultiplayerDeath(reason) {
   sendMultiplayerBroadcast("player_dead", death);
   trackMultiplayerPresence({ alive: false });
   drawGame();
+
+  // Keep sending state ticks after death so the opponent's disconnect check
+  // doesn't mistake our silence for a connection drop before result resolves.
+  if (multiplayer.deathTickInterval) {
+    clearInterval(multiplayer.deathTickInterval);
+  }
+  multiplayer.deathTickInterval = setInterval(() => {
+    if (multiplayer.result || !multiplayer.channel || !multiplayer.subscribed) {
+      clearInterval(multiplayer.deathTickInterval);
+      multiplayer.deathTickInterval = null;
+      return;
+    }
+    sendMultiplayerBroadcast("state_tick", {
+      playerId: multiplayer.playerId,
+      name: getSavedLeaderboardName() || "Player",
+      characterId: saveState.equippedCharacter,
+      xRatio: 0.5,
+      yOffset: 9999,
+      size: game ? game.player.width : 40,
+      score: game ? game.score : 0,
+      alive: false,
+      runTime: game ? game.runTime : 0
+    });
+  }, MULTIPLAYER_STATE_INTERVAL * 1000);
 }
 
 function recordMultiplayerDeath(payload) {
@@ -3101,7 +3131,11 @@ function resolveMultiplayerResult() {
     }
   }
 
-  sendMultiplayerBroadcast("match_result", result);
+  // Only the host broadcasts the authoritative result to prevent both sides
+  // sending conflicting match_result payloads and both seeing themselves as winner.
+  if (multiplayer.isHost) {
+    sendMultiplayerBroadcast("match_result", result);
+  }
   finishMultiplayerMatch(result);
 }
 
@@ -3179,6 +3213,7 @@ function finishMultiplayerMatch(result) {
   }
 
   saveMultiplayerRunXp();
+  saveMultiplayerStats(result);
   pauseOverlay.classList.add("hidden");
   countdownOverlay.classList.add("hidden");
   restartButton.textContent = "Back To Lobby";
@@ -3227,6 +3262,58 @@ function saveMultiplayerRunXp() {
   game.xpSaved = true;
   saveState.xp += earned;
   saveData();
+}
+
+async function saveMultiplayerStats(result) {
+  if (!leaderboardClient || !authState || !authState.user) {
+    return; // Not logged in — skip leaderboard save
+  }
+
+  const isDraw = !result.winnerId && !result.loserId;
+  const didWin = result.winnerId === multiplayer.playerId;
+  const didLose = result.loserId === multiplayer.playerId;
+
+  if (!didWin && !didLose && !isDraw) {
+    return; // Spectator or unknown role — skip
+  }
+
+  const playerName = getSavedLeaderboardName() || "Player";
+  const characterId = saveState.equippedCharacter || "regular";
+
+  try {
+    // Fetch current stats so we can increment them
+    const { data: existing } = await leaderboardClient
+      .from("multiplayer_leaderboard")
+      .select("wins, losses, win_streak")
+      .eq("user_id", authState.user.id)
+      .maybeSingle();
+
+    const prevWins = existing ? existing.wins : 0;
+    const prevLosses = existing ? existing.losses : 0;
+    const prevStreak = existing ? existing.win_streak : 0;
+
+    const newWins = prevWins + (didWin ? 1 : 0);
+    const newLosses = prevLosses + (didLose ? 1 : 0);
+    const newStreak = didWin ? prevStreak + 1 : 0;
+
+    await leaderboardClient
+      .from("multiplayer_leaderboard")
+      .upsert(
+        {
+          user_id: authState.user.id,
+          player_name: playerName,
+          wins: newWins,
+          losses: newLosses,
+          win_streak: newStreak,
+          character_id: characterId,
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: "user_id" }
+      );
+  } catch (err) {
+    // Leaderboard save is best-effort; never crash the game over it
+    console.warn("saveMultiplayerStats failed:", err);
+  }
 }
 
 function resetMultiplayerLobby(shouldBroadcast = true) {
