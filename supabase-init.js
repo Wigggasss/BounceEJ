@@ -1,7 +1,7 @@
 (function() {
   // Use your provided credentials
   window.BOUNCE_EJ_SUPABASE = {
-    url: "https://supabase.co",
+    url: "https://imhorwdmvhguvsayleqr.supabase.co"
     publishableKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltaG9yd2RtdmhndXZzYXlsZXFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2NTQ4MjMsImV4cCI6MjA5MzIzMDgyM30.r0rKsHkIAQ8GrUPCY0rYS1z-8rT7fTGDRJfWU6RSNWM"
   };
 
