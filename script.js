@@ -179,36 +179,6 @@ const DEFAULT_POWERUPS = [
   }
 ];
 
-const THEMES = {
-  blue: {
-    canvasBg: "#42a6e8",
-    canvasRayLight: "rgba(91, 200, 255, 0.16)",
-    canvasRayDark: "rgba(23, 96, 166, 0.12)",
-    canvasLine: "#7ec8ff"
-  },
-  green: {
-    canvasBg: "#97d64a",
-    canvasRayLight: "rgba(255, 255, 255, 0.12)",
-    canvasRayDark: "rgba(88, 167, 26, 0.1)",
-    canvasLine: "#c9ff75"
-  },
-  purple: {
-    canvasBg: "#9b6cf4",
-    canvasRayLight: "rgba(255, 255, 255, 0.13)",
-    canvasRayDark: "rgba(78, 38, 148, 0.12)",
-    canvasLine: "#c49bff"
-  }
-};
-
-const DEFAULT_SETTINGS = {
-  theme: "blue",
-  particles: true,
-  showGamepadStatus: true,
-  sensitivity: 1,
-  backgroundImage: "",
-  backgroundName: ""
-};
-
 const GAME_MODES = {
   classic: {
     id: "classic",
@@ -393,38 +363,6 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   return map;
 }, {});
 let leaderboardClient = createLeaderboardClient();
-
-function createMultiplayerState() {
-  return {
-    roomCode: "",
-    players: [],
-    joined: false,
-    lastPing: performance.now(),
-    status: "idle"
-  };
-}
-
-function showMultiplayer() {
-  multiplayerStatus.textContent = "Multiplayer is currently unavailable in this build.";
-  showScreen(multiplayerScreen);
-  multiplayerSetup.classList.remove("hidden");
-  multiplayerLobby.classList.add("hidden");
-}
-
-function resetMultiplayerLobby() {
-  multiplayer = createMultiplayerState();
-  multiplayerSetup.classList.remove("hidden");
-  multiplayerLobby.classList.add("hidden");
-  multiplayerStatus.textContent = "Create a room or join a friend.";
-}
-
-function updateMultiplayerState() {
-  // Multiplayer is currently a placeholder in this build.
-}
-
-function checkMultiplayerDisconnect() {
-  // No active multiplayer connection to track.
-}
 
 const authState = {
   session: null,
@@ -1134,11 +1072,7 @@ function triggerAntiCheat(reason) {
 // ============================================
 
 function showScreen(screen) {
-  allScreens.forEach((s) => {
-    s.classList.add("hidden");
-    s.classList.remove("active");
-  });
-
+  allScreens.forEach((s) => s.classList.add("hidden"));
   screen.classList.remove("hidden");
   screen.classList.add("active");
 }
@@ -1593,7 +1527,7 @@ function getLockedLeaderboardName() {
 // ============================================
 
 function createLeaderboardClient() {
-  if (!window.BOUNCE_EJ_SUPABASE) {
+  if (!window.BOUNCE_EJ_SUPABASE || !window.supabase || typeof window.supabase.createClient !== "function") {
     return null;
   }
 
@@ -1670,23 +1604,23 @@ function gainRunXp(amount) {
   game.xpRun += amount;
 }
 
-function seedPlatforms(canvasWidth, height, mode, rng) {
+function seedPlatforms(width, height, mode, rng) {
   const platforms = [];
   const startY = height - 95 - 48;
   let nextY = startY - 200;
-  let nextCenter = canvasWidth / 2;
+  let nextCenter = width / 2;
 
   // Starting platform
-  platforms.push(createPlatform(canvasWidth / 2 - 60, startY + 48, "normal", mode, canvasWidth, rng));
+  platforms.push(createPlatform(width / 2 - 60, startY + 48, "normal", mode, width, rng));
 
   // Generate platforms going up
   while (nextY > -1000) {
     const gapScale = mode.gapScale * Math.min(1.22, 1 + (Math.floor((startY - nextY) / 1000) * 0.1));
     const type = randomPlatformType(rng);
-    const platformWidth = getPlatformWidth(type);
-    const x = pickPlatformX(nextCenter, platformWidth, canvasWidth, rng);
-    nextCenter = x + platformWidth / 2;
-    platforms.push(createPlatform(x, nextY, type, mode, canvasWidth, rng));
+    const width = getPlatformWidth(type);
+    const x = pickPlatformX(nextCenter, width, game.width, rng);
+    nextCenter = x + width / 2;
+    platforms.push(createPlatform(x, nextY, type, mode, game.width, rng));
     nextY -= (72 + rng() * 48) * gapScale;
   }
 
@@ -2561,6 +2495,853 @@ function init() {
       lockIcon.style.display = 'none';
     }
   }
+}
+
+
+// ============================================
+// MULTIPLAYER MODULE
+// ============================================
+// ============================================
+// MULTIPLAYER STATE MANAGEMENT
+// ============================================
+
+function createMultiplayerState() {
+  return {
+    playerId: createClientId(),
+    channel: null,
+    roomCode: "",
+    role: "",
+    isHost: false,
+    ready: false,
+    status: "idle",
+    subscribed: false,
+    joinedAt: 0,
+    players: [],
+    opponent: null,
+    opponentLeftAt: 0,
+    lastOpponentStateAt: 0,
+    matchHadOpponent: false,
+    matchStartedAt: 0,
+    matchOpponentId: "",
+    matchSeed: "",
+    selectedMode: "classic",
+    deaths: {},
+    result: null,
+    resultTimer: null,
+    startQueued: false
+  };
+}
+
+function updateMultiplayerState(deltaSeconds) {
+  if (!game || !game.onlineDuel || !multiplayer.channel) {
+    return;
+  }
+
+  // Send player state to opponent
+  if (game.runTime - multiplayerLastStateSentAt >= MULTIPLAYER_STATE_INTERVAL) {
+    sendMultiplayerBroadcast("playerState", {
+      x: game.player.x,
+      y: game.player.y,
+      score: game.score,
+      cameraY: game.cameraY
+    });
+    multiplayerLastStateSentAt = game.runTime;
+  }
+
+  // Send presence updates
+  if (game.runTime - multiplayerLastPresenceSentAt >= MULTIPLAYER_PRESENCE_INTERVAL) {
+    trackMultiplayerPresence({
+      score: game.score,
+      cameraY: game.cameraY
+    });
+    multiplayerLastPresenceSentAt = game.runTime;
+  }
+}
+
+// ============================================
+// MULTIPLAYER ROOM MANAGEMENT
+// ============================================
+
+function createMultiplayerRoom() {
+  connectMultiplayerRoom(createRoomCode(), "host");
+}
+
+function joinMultiplayerRoomFromInput() {
+  const code = sanitizeRoomCode(joinRoomInput.value);
+  joinRoomInput.value = code;
+
+  if (code.length < 4) {
+    showMultiplayerStatus("Enter a room code first.", "error");
+    return;
+  }
+
+  connectMultiplayerRoom(code, "guest");
+}
+
+function connectMultiplayerRoom(roomCode, role) {
+  if (!leaderboardClient) {
+    showMultiplayerStatus("Supabase Realtime is offline.", "error");
+    return;
+  }
+
+  if (multiplayer.channel) {
+    leaveMultiplayerRoom();
+  }
+
+  multiplayer = createMultiplayerState();
+  multiplayer.roomCode = roomCode;
+  multiplayer.role = role;
+  multiplayer.isHost = role === "host";
+  multiplayer.status = "connecting";
+
+  const channelName = `${MULTIPLAYER_CHANNEL_PREFIX}${roomCode}`;
+  multiplayer.channel = leaderboardClient.channel(channelName, {
+    config: {
+      presence: {
+        key: multiplayer.playerId
+      },
+      broadcast: {
+        self: true
+      }
+    }
+  });
+
+  multiplayer.channel
+    .on("presence", { event: "sync" }, () => syncMultiplayerPresence())
+    .on("presence", { event: "join" }, ({ key, newPresences }) => handleMultiplayerPresenceJoin({ key, newPresences }))
+    .on("presence", { event: "leave" }, ({ key, leftPresences }) => handleMultiplayerPresenceLeave({ leftPresences }))
+    .on("broadcast", { event: "room_seed" }, ({ payload }) => handleMultiplayerRoomSeed(payload))
+    .on("broadcast", { event: "ready_update" }, ({ payload }) => handleMultiplayerReadyUpdate(payload))
+    .on("broadcast", { event: "start_match" }, ({ payload }) => handleMultiplayerStartMatch(payload))
+    .on("broadcast", { event: "state_tick" }, ({ payload }) => handleMultiplayerStateTick(payload))
+    .on("broadcast", { event: "player_dead" }, ({ payload }) => handleMultiplayerPlayerDead(payload))
+    .on("broadcast", { event: "match_result" }, ({ payload }) => handleMultiplayerMatchResult(payload))
+    .on("broadcast", { event: "rematch_request" }, ({ payload }) => handleMultiplayerRematchRequest(payload))
+    .on("broadcast", { event: "leave_match" }, ({ payload }) => handleMultiplayerLeaveMatch(payload))
+    .subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        multiplayer.subscribed = true;
+        multiplayer.joinedAt = Date.now();
+        multiplayer.status = "lobby";
+        trackMultiplayerPresence();
+        renderMultiplayerScreen();
+        showMultiplayerStatus("Connected to room.", "success");
+      } else if (status === "CHANNEL_ERROR") {
+        showMultiplayerStatus("Failed to connect to room.", "error");
+        leaveMultiplayerRoom();
+      } else if (status === "TIMED_OUT") {
+        showMultiplayerStatus("Connection timed out.", "error");
+        leaveMultiplayerRoom();
+      } else if (status === "CLOSED") {
+        leaveMultiplayerRoom();
+      }
+    });
+}
+
+function leaveMultiplayerRoom(shouldBroadcast = true) {
+  if (!multiplayer.channel) {
+    return;
+  }
+
+  if (shouldBroadcast) {
+    sendMultiplayerBroadcast("leave_match", { playerId: multiplayer.playerId });
+  }
+
+  multiplayer.channel.unsubscribe();
+  multiplayer.channel = null;
+  multiplayer = createMultiplayerState();
+  renderMultiplayerScreen();
+}
+
+function createRoomCode() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let result = "";
+  for (let i = 0; i < MULTIPLAYER_ROOM_CODE_LENGTH; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+function sanitizeRoomCode(code) {
+  return code.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, MULTIPLAYER_ROOM_CODE_LENGTH);
+}
+
+// ============================================
+// MULTIPLAYER PRESENCE & SYNC
+// ============================================
+
+function trackMultiplayerPresence(patch = {}) {
+  if (!multiplayer.channel || !multiplayer.subscribed) {
+    return;
+  }
+
+  if (typeof patch.ready === "boolean") {
+    multiplayer.ready = patch.ready;
+  }
+
+  const trackResult = multiplayer.channel.track(getOwnMultiplayerPresence());
+
+  if (trackResult && typeof trackResult.catch === "function") {
+    trackResult.catch(() => {});
+  }
+}
+
+function getOwnMultiplayerPresence() {
+  const character = getCharacter(saveState.equippedCharacter);
+  const playerName = getSavedLeaderboardName() || "Player";
+  const inOnlineGame = game && game.onlineDuel;
+  const player = inOnlineGame ? game.player : null;
+
+  return {
+    roomCode: multiplayer.roomCode,
+    playerId: multiplayer.playerId,
+    name: playerName,
+    characterId: character.id,
+    role: multiplayer.role,
+    ready: multiplayer.ready,
+    alive: !inOnlineGame || game.running,
+    score: inOnlineGame ? game.score : 0,
+    status: multiplayer.status,
+    xRatio: player ? (player.x + player.width / 2) / game.width : null,
+    yOffset: player ? player.y - game.startY : null,
+    size: player ? player.width : 48,
+    runTime: inOnlineGame ? game.runTime : 0,
+    joinedAt: multiplayer.joinedAt,
+    updatedAt: Date.now(),
+    wins: saveState.wins || 0,
+    losses: saveState.losses || 0,
+    winStreak: saveState.winStreak || 0
+  };
+}
+
+function syncMultiplayerPresence() {
+  if (!multiplayer.channel) {
+    return;
+  }
+
+  const allPlayers = flattenMultiplayerPresence(multiplayer.channel.presenceState());
+  const acceptedPlayers = getAcceptedMultiplayerPlayers(allPlayers);
+  const selfAccepted = acceptedPlayers.some((player) => player.playerId === multiplayer.playerId);
+
+  if (allPlayers.length > MULTIPLAYER_MAX_PLAYERS && !selfAccepted) {
+    leaveMultiplayerRoom(false);
+    renderMultiplayerScreen();
+    showMultiplayerStatus("Room full.", "error");
+    return;
+  }
+
+  const hadOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
+  multiplayer.players = acceptedPlayers;
+
+  if (!hadOpponent && multiplayer.players.length === MULTIPLAYER_MAX_PLAYERS) {
+    multiplayer.opponentLeftAt = 0;
+  } else if (hadOpponent && !multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = Date.now();
+  }
+
+  trackMultiplayerPresence();
+  renderMultiplayerScreen();
+}
+
+function handleMultiplayerPresenceJoin({ key, newPresences }) {
+  syncMultiplayerPresence();
+}
+
+function handleMultiplayerPresenceLeave({ leftPresences }) {
+  const opponentLeft = (leftPresences || []).some((presence) => presence.playerId && presence.playerId !== multiplayer.playerId);
+
+  if (opponentLeft && !multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = Date.now();
+  }
+
+  syncMultiplayerPresence();
+}
+
+function flattenMultiplayerPresence(presenceState) {
+  const players = [];
+
+  for (const key in presenceState) {
+    const presences = presenceState[key] || [];
+    for (const presence of presences) {
+      players.push(presence);
+    }
+  }
+
+  return players;
+}
+
+function getAcceptedMultiplayerPlayers(allPlayers) {
+  const playersById = {};
+  const now = Date.now();
+
+  for (const player of allPlayers) {
+    if (!player.playerId || !player.roomCode || player.roomCode !== multiplayer.roomCode) {
+      continue;
+    }
+
+    const existing = playersById[player.playerId];
+
+    if (!existing || player.updatedAt > existing.updatedAt) {
+      playersById[player.playerId] = player;
+    }
+  }
+
+  return Object.values(playersById)
+    .filter((player) => now - player.updatedAt < MULTIPLAYER_PRESENCE_LEAVE_GRACE * 1000)
+    .sort((a, b) => a.joinedAt - b.joinedAt);
+}
+
+// ============================================
+// MULTIPLAYER BROADCAST HANDLERS
+// ============================================
+
+function handleMultiplayerRoomSeed(payload) {
+  if (!multiplayer.channel || multiplayer.status !== "starting") {
+    return;
+  }
+
+  multiplayer.matchSeed = payload.seed;
+}
+
+function handleMultiplayerReadyUpdate(payload) {
+  if (!multiplayer.channel || payload.senderId === multiplayer.playerId) {
+    return;
+  }
+
+  syncMultiplayerPresence();
+}
+
+function handleMultiplayerStartMatch(payload) {
+  if (!multiplayer.channel || payload.senderId !== multiplayer.matchOpponentId) {
+    return;
+  }
+
+  startMultiplayerMatch(payload);
+}
+
+function handleMultiplayerStateTick(payload) {
+  if (!game || !game.onlineDuel || payload.playerId === multiplayer.playerId) {
+    return;
+  }
+
+  multiplayer.lastOpponentStateAt = Date.now();
+  multiplayer.opponent = payload;
+}
+
+function handleMultiplayerPlayerDead(payload) {
+  if (!game || !game.onlineDuel || payload.playerId === multiplayer.playerId) {
+    return;
+  }
+
+  recordMultiplayerDeath(payload);
+}
+
+function handleMultiplayerMatchResult(payload) {
+  if (!game || !game.onlineDuel || payload.senderId === multiplayer.playerId) {
+    return;
+  }
+
+  finishMultiplayerMatch(payload);
+}
+
+function handleMultiplayerRematchRequest(payload) {
+  resetMultiplayerLobby(false);
+  showMultiplayerStatus(`${sanitizeLeaderboardName(payload.name || "Opponent") || "Opponent"} wants a rematch.`, "");
+}
+
+function handleMultiplayerLeaveMatch(payload) {
+  if (eventName === "leave_match" && payload.senderId !== multiplayer.playerId && game && game.onlineDuel && multiplayer.status === "playing") {
+    finishMultiplayerMatch({
+      winnerId: multiplayer.playerId,
+      loserId: payload.senderId,
+      reason: "left",
+      scores: getMultiplayerScoreMap()
+    });
+  }
+}
+
+// ============================================
+// MULTIPLAYER GAME MANAGEMENT
+// ============================================
+
+function maybeStartMultiplayerMatch() {
+  if (!multiplayer.isHost || multiplayer.startQueued || multiplayer.status !== "lobby") {
+    return;
+  }
+
+  if (multiplayer.players.length !== MULTIPLAYER_MAX_PLAYERS || !multiplayer.players.every((player) => player.ready)) {
+    return;
+  }
+
+  const seed = `${multiplayer.roomCode}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  multiplayer.startQueued = true;
+  multiplayer.status = "starting";
+  multiplayer.matchSeed = seed;
+  renderMultiplayerScreen();
+  sendMultiplayerBroadcast("room_seed", { seed });
+  sendMultiplayerBroadcast("start_match", {
+    seed,
+    mode: multiplayer.selectedMode || "classic",
+    players: multiplayer.players.map((player) => ({
+      playerId: player.playerId,
+      name: player.name,
+      characterId: player.characterId
+    }))
+  });
+}
+
+function startMultiplayerMatch(payload) {
+  if (!multiplayer.channel || (game && game.onlineDuel && game.running)) {
+    return;
+  }
+
+  multiplayer.status = "playing";
+  multiplayer.ready = false;
+  multiplayer.startQueued = false;
+  multiplayer.matchSeed = payload.seed || multiplayer.matchSeed || `${multiplayer.roomCode}-fallback`;
+  multiplayer.deaths = {};
+  multiplayer.result = null;
+  multiplayer.opponent = null;
+  multiplayer.opponentLeftAt = 0;
+  multiplayer.lastOpponentStateAt = Date.now();
+  multiplayer.matchStartedAt = Date.now();
+  const payloadPlayers = Array.isArray(payload.players) ? payload.players : [];
+  const payloadOpponent = payloadPlayers.find((player) => player && player.playerId && player.playerId !== multiplayer.playerId);
+  multiplayer.matchOpponentId = payloadOpponent ? String(payloadOpponent.playerId) : "";
+  multiplayer.matchHadOpponent = Boolean(multiplayer.matchOpponentId) || multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
+  clearMultiplayerResultTimer();
+  const gameMode = payload.mode || "classic";
+  startGame(gameMode, {
+    onlineDuel: true,
+    seed: multiplayer.matchSeed,
+    roomCode: multiplayer.roomCode
+  });
+  trackMultiplayerPresence();
+}
+
+function sendMultiplayerBroadcast(eventName, payload = {}) {
+  if (!multiplayer.channel || !multiplayer.subscribed) {
+    return Promise.resolve("offline");
+  }
+
+  return multiplayer.channel.send({
+    type: "broadcast",
+    event: eventName,
+    payload: { ...payload, senderId: multiplayer.playerId }
+  });
+}
+
+// ============================================
+// MULTIPLAYER DEATH & RESULT HANDLING
+// ============================================
+
+function handleLocalMultiplayerDeath(reason) {
+  if (game.multiplayerDeathSent) {
+    return;
+  }
+
+  game.running = false;
+  game.paused = false;
+  game.multiplayerDeathSent = true;
+  pauseOverlay.classList.add("hidden");
+  countdownOverlay.classList.add("hidden");
+  resetInput();
+
+  const death = {
+    playerId: multiplayer.playerId,
+    name: getSavedLeaderboardName() || "Player",
+    score: game.score,
+    diedAt: Date.now(),
+    reason
+  };
+
+  recordMultiplayerDeath(death);
+  sendMultiplayerBroadcast("player_dead", death);
+  trackMultiplayerPresence({ alive: false });
+  drawGame();
+}
+
+function recordMultiplayerDeath(death) {
+  multiplayer.deaths[death.playerId] = death;
+}
+
+function getMultiplayerScoreMap() {
+  const scores = {};
+
+  for (const playerId in multiplayer.deaths) {
+    scores[playerId] = multiplayer.deaths[playerId].score;
+  }
+
+  if (game && game.onlineDuel && game.running) {
+    scores[multiplayer.playerId] = game.score;
+  }
+
+  return scores;
+}
+
+function getOtherMultiplayerPlayerId(playerId) {
+  for (const player of multiplayer.players) {
+    if (player.playerId !== playerId) {
+      return player.playerId;
+    }
+  }
+
+  return null;
+}
+
+function finishMultiplayerMatch(result) {
+  if (!game || !game.onlineDuel || multiplayer.result) {
+    return;
+  }
+
+  multiplayer.result = result;
+  multiplayer.status = "ended";
+  clearMultiplayerResultTimer();
+
+  if (game.running) {
+    game.running = false;
+  }
+
+  // MULTIPLAYER TRACKING: Update wins/losses/streak
+  const isDraw = !result.winnerId;
+  const didWin = result.winnerId === multiplayer.playerId;
+  const didLose = result.loserId === multiplayer.playerId;
+
+  if (didWin) {
+    saveState.wins = (saveState.wins || 0) + 1;
+    saveState.winStreak = (saveState.winStreak || 0) + 1;
+  } else if (didLose) {
+    saveState.losses = (saveState.losses || 0) + 1;
+    saveState.winStreak = 0; // Reset streak on loss
+  } else {
+    // Draw - no change to wins/losses
+  }
+
+  // MULTIPLAYER XP BONUS: +50 for win, +10 for loss
+  let bonusXp = 0;
+  if (didWin) {
+    bonusXp = 50;
+  } else if (didLose) {
+    bonusXp = 10;
+  }
+
+  saveMultiplayerRunXp(bonusXp);
+  queueProfileSync();
+
+  pauseOverlay.classList.add("hidden");
+  countdownOverlay.classList.add("hidden");
+  restartButton.textContent = "Back To Lobby";
+  gameOverTitle.textContent = isDraw ? "Draw" : didWin ? "Victory" : didLose ? "Defeat" : "Match Over";
+  gameOverMessage.textContent = getMultiplayerResultMessage(result);
+
+  // MULTIPLAYER XP DISPLAY: Show bonus on game over screen
+  if (bonusXp > 0) {
+    gameOverMessage.textContent += ` +${bonusXp} XP bonus!`;
+  }
+
+  gameOverMessage.classList.remove("hidden");
+  finalScore.textContent = game.score;
+  finalBest.textContent = getModeBest("classic");
+  finalTotalXp.textContent = saveState.xp;
+  prepareLeaderboardSubmit();
+  gameOverOverlay.classList.remove("hidden");
+  trackMultiplayerPresence({ ready: false });
+}
+
+function finishMultiplayerDisconnect() {
+  if (!game || !game.onlineDuel || multiplayer.result) {
+    return;
+  }
+
+  const result = {
+    winnerId: multiplayer.playerId,
+    loserId: getOtherMultiplayerPlayerId(multiplayer.playerId),
+    reason: "disconnect",
+    scores: getMultiplayerScoreMap()
+  };
+
+  sendMultiplayerBroadcast("match_result", result);
+  finishMultiplayerMatch(result);
+}
+
+function getMultiplayerResultMessage(result) {
+  if (result.reason === "disconnect") {
+    return "Opponent disconnected.";
+  }
+
+  if (result.reason === "left") {
+    return "Opponent left the match.";
+  }
+
+  if (result.reason === "timeUp") {
+    return "Time ran out.";
+  }
+
+  return "";
+}
+
+function clearMultiplayerResultTimer() {
+  if (multiplayer.resultTimer) {
+    clearTimeout(multiplayer.resultTimer);
+    multiplayer.resultTimer = null;
+  }
+}
+
+// ============================================
+// MULTIPLAYER DISCONNECT DETECTION
+// ============================================
+
+function checkMultiplayerDisconnect() {
+  if (multiplayer.result || !multiplayer.matchHadOpponent) {
+    return;
+  }
+
+  const now = Date.now();
+  const lastSeenAt = Math.max(multiplayer.lastOpponentStateAt || 0, multiplayer.matchStartedAt || 0);
+
+  if (multiplayer.opponentLeftAt && multiplayer.lastOpponentStateAt > multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = 0;
+    return;
+  }
+
+  const missingSince = multiplayer.opponentLeftAt || lastSeenAt;
+  const elapsed = (now - missingSince) / 1000;
+  const limit = multiplayer.opponentLeftAt ? MULTIPLAYER_PRESENCE_LEAVE_GRACE : MULTIPLAYER_DISCONNECT_LIMIT;
+
+  if (elapsed < limit) {
+    return;
+  }
+
+  finishMultiplayerDisconnect();
+}
+
+// ============================================
+// MULTIPLAYER UI MANAGEMENT
+// ============================================
+
+function renderMultiplayerScreen() {
+  const inRoom = Boolean(multiplayer.channel);
+
+  multiplayerSetup.classList.toggle("hidden", inRoom);
+  multiplayerLobby.classList.toggle("hidden", !inRoom);
+  multiplayerRoomCode.textContent = multiplayer.roomCode || "----";
+  multiplayerReadyButton.textContent = multiplayer.ready ? "Ready!" : "Ready";
+  multiplayerReadyButton.disabled = !multiplayer.subscribed || multiplayer.status === "starting" || multiplayer.status === "playing";
+
+  if (!inRoom) {
+    multiplayerPlayerList.innerHTML = "";
+    multiplayerLobbyCountdown.textContent = "Waiting for two ready players.";
+    return;
+  }
+
+  renderMultiplayerPlayers();
+  updateMultiplayerLobbyText();
+}
+
+function renderMultiplayerPlayers() {
+  multiplayerPlayerList.innerHTML = "";
+
+  for (let index = 0; index < MULTIPLAYER_MAX_PLAYERS; index += 1) {
+    const player = multiplayer.players[index];
+    const row = document.createElement("div");
+    const image = document.createElement("img");
+    const copy = document.createElement("div");
+    const name = document.createElement("strong");
+    const meta = document.createElement("span");
+    const state = document.createElement("span");
+    const character = getCharacter(player && player.characterId);
+    const isCurrentPlayer = player && player.id === multiplayer.playerId;
+
+    // Win streak display (WL format or current streak for self)
+    let streakText = "";
+    if (player && player.id === multiplayer.playerId) {
+      const wins = saveState.wins || 0;
+      const losses = saveState.losses || 0;
+      const streak = saveState.winStreak || 0;
+      streakText = streak > 0 ? ` - 🔥 ${streak} streak` : ` - ${wins}W ${losses}L`;
+    } else if (player) {
+      // For opponent, we'll show their win/loss if available via presence
+      streakText = player.winStreak ? ` - 🔥 ${player.winStreak} streak` : (player.wins || player.losses ? ` - ${player.wins || 0}W ${player.losses || 0}L` : "");
+    }
+
+    row.className = "multiplayer-player";
+    image.src = character.asset;
+    image.alt = character.name;
+    copy.className = "multiplayer-player-copy";
+    name.textContent = player ? player.name : "Waiting...";
+    meta.textContent = player ? `${player.role === "host" ? "Host" : "Guest"} - ${character.name}${streakText}` : "Invite a friend";
+    state.className = `multiplayer-player-state ${player && player.ready ? "is-ready" : "is-waiting"}`;
+    state.textContent = player ? (player.ready ? "Ready" : "Waiting") : "Open";
+    copy.append(name, meta);
+    row.append(image, copy, state);
+    multiplayerPlayerList.appendChild(row);
+  }
+}
+
+function updateMultiplayerLobbyText() {
+  if (multiplayer.status === "starting") {
+    multiplayerLobbyCountdown.textContent = "Starting duel...";
+    showMultiplayerStatus("Both players are ready. Launching match.", "success");
+    return;
+  }
+
+  if (multiplayer.status === "playing") {
+    multiplayerLobbyCountdown.textContent = "Match in progress.";
+    showMultiplayerStatus("Online duel is live.", "success");
+    return;
+  }
+
+  const playerCount = multiplayer.players.length;
+
+  if (playerCount < MULTIPLAYER_MAX_PLAYERS) {
+    multiplayerLobbyCountdown.textContent = "Waiting for one more player.";
+    showMultiplayerStatus("Share the room code with a friend.", "");
+    return;
+  }
+
+  if (multiplayer.players.every((player) => player.ready)) {
+    const selectedMode = GAME_MODES[multiplayer.selectedMode] || GAME_MODES.classic;
+    multiplayerLobbyCountdown.textContent = `Both players ready. Mode: ${selectedMode.label}`;
+    showMultiplayerStatus("Starting as soon as the host syncs the seed.", "success");
+    return;
+  }
+
+  multiplayerLobbyCountdown.textContent = "Both players must press Ready.";
+  showMultiplayerStatus("Waiting on ready checks.", "");
+}
+
+function resetMultiplayerLobby(shouldBroadcast = true) {
+  if (!multiplayer.channel) {
+    showMultiplayer();
+    return;
+  }
+
+  stopGameLoop();
+  hideRunOverlays();
+  multiplayer.status = "lobby";
+  multiplayer.ready = false;
+  multiplayer.startQueued = false;
+  multiplayer.matchSeed = "";
+  multiplayer.deaths = {};
+  multiplayer.result = null;
+  multiplayer.opponent = null;
+  multiplayer.opponentLeftAt = 0;
+  multiplayer.lastOpponentStateAt = 0;
+  multiplayer.matchHadOpponent = false;
+  multiplayer.matchStartedAt = 0;
+  multiplayer.matchOpponentId = "";
+  clearMultiplayerResultTimer();
+
+  if (shouldBroadcast) {
+    sendMultiplayerBroadcast("rematch_request", { name: getSavedLeaderboardName() || "Player" });
+  }
+
+  trackMultiplayerPresence({ ready: false });
+  renderMultiplayerScreen();
+  showScreen(multiplayerScreen);
+}
+
+function showMultiplayerStatus(message, type = "") {
+  multiplayerStatus.textContent = message;
+  multiplayerStatus.className = `multiplayer-status ${type}`;
+}
+
+function showMultiplayer() {
+  showScreen(multiplayerScreen);
+  renderMultiplayerScreen();
+}
+
+// ============================================
+// MULTIPLAYER XP MANAGEMENT
+// ============================================
+
+function saveMultiplayerRunXp(bonusXp = 0) {
+  if (!game || game.xpSaved) {
+    return;
+  }
+
+  const scoreXp = Math.floor(game.score / 20);
+  const earned = scoreXp + game.xpRun + bonusXp;
+  game.finalXpEarned = earned;
+  game.xpSaved = true;
+  saveState.xp += earned;
+  saveData();
+}
+
+// ============================================
+// MULTIPLAYER LEADERBOARD MODULE
+// ============================================
+// ============================================
+// MULTIPLAYER LEADERBOARD
+// ============================================
+
+function updateLeaderboardTabDisplay() {
+  const isMultiplayer = leaderboardType === "multiplayer";
+  leaderboardTitle.textContent = isMultiplayer ? "Multiplayer Rankings" : "Leaderboard";
+  leaderboardRefreshButton.textContent = isMultiplayer ? "Switch to Classic" : "Switch to Multiplayer";
+}
+
+async function loadMultiplayerLeaderboard() {
+  if (!leaderboardClient || leaderboardLoading) {
+    if (!leaderboardClient) {
+      renderLeaderboardError("Multiplayer leaderboard offline.");
+    }
+    return;
+  }
+
+  leaderboardLoading = true;
+  leaderboardStatus.textContent = "Loading multiplayer rankings...";
+  leaderboardList.innerHTML = "";
+
+  const { data, error } = await leaderboardClient
+    .from("multiplayer_leaderboard")
+    .select("player_name, wins, losses, win_streak, character_id, updated_at")
+    .order("wins", { ascending: false })
+    .order("win_streak", { ascending: false })
+    .limit(LEADERBOARD_LIMIT);
+
+  leaderboardLoading = false;
+
+  if (error) {
+    renderLeaderboardError("Could not load multiplayer rankings.");
+    return;
+  }
+
+  renderMultiplayerLeaderboard(data || []);
+}
+
+function renderMultiplayerLeaderboard(players) {
+  leaderboardList.innerHTML = "";
+
+  if (!players.length) {
+    leaderboardStatus.textContent = "No multiplayer rankings yet.";
+    return;
+  }
+
+  leaderboardStatus.textContent = "";
+
+  players.forEach((entry, index) => {
+    const row = document.createElement("li");
+    const rank = document.createElement("strong");
+    const player = document.createElement("span");
+    const playerName = document.createElement("strong");
+    const meta = document.createElement("span");
+    const stats = document.createElement("strong");
+    const character = getCharacter(entry.character_id);
+
+    rank.className = "leaderboard-rank";
+    rank.textContent = `#${index + 1}`;
+    player.className = "leaderboard-player";
+    playerName.textContent = censorLeaderboardName(entry.player_name || "Player");
+    const streakDisplay = entry.win_streak > 0 ? ` 🔥 ${entry.win_streak}` : "";
+    meta.textContent = `${character.name} - ${entry.wins || 0}W ${entry.losses || 0}L${streakDisplay}`;
+    stats.className = "leaderboard-score";
+    stats.textContent = entry.wins || 0;
+
+    player.append(playerName, meta);
+    row.append(rank, player, stats);
+    leaderboardList.appendChild(row);
+  });
 }
 
 // Start the application
