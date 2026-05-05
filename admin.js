@@ -1,16 +1,32 @@
-const { url, publishableKey } = window.BOUNCE_EJ_SUPABASE;
-const supabase = window.supabase.createClient(url, publishableKey);
-const adminChannel = supabase.channel('admin_control_center');
+(function() {
+    function getSupabaseClient() {
+        if (window.supabaseClient) {
+            return window.supabaseClient;
+        }
 
-adminChannel.subscribe();
+        const config = window.BOUNCE_EJ_SUPABASE;
+        if (!window.supabase || !config || !config.url || !config.publishableKey) {
+            console.warn("Supabase SDK is unavailable; admin panel commands are offline.");
+            return null;
+        }
 
-// Function to lock/unlock any button on all players' screens
-function sendButtonCommand(buttonId, isLocked, newText) {
-    adminChannel.send({
-        type: 'broadcast',
-        event: 'lock_button',
-        payload: { id: buttonId, locked: isLocked, text: newText }
-    });
-}
+        window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+        return window.supabaseClient;
+    }
 
-// Example: sendButtonCommand('multiplayerButton', true, 'UPDATING...');
+    const client = getSupabaseClient();
+    if (!client) {
+        return;
+    }
+
+    const adminChannel = client.channel('admin_control');
+    adminChannel.subscribe();
+
+    window.sendButtonCommand = function(buttonId, isLocked, newText) {
+        adminChannel.send({
+            type: 'broadcast',
+            event: 'remote_lock',
+            payload: { id: buttonId, locked: isLocked, text: newText }
+        });
+    };
+})();

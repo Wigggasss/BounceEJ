@@ -65,34 +65,52 @@
     </div>
 
     <div class="btn-grid">
-        <button class="lock-btn" onclick="sendCmd(true)">LOCK</button>
-        <button class="unlock-btn" onclick="sendCmd(false)">UNLOCK</button>
-        <button class="debug-btn" onclick="sendDebug('888')">CODE 888: MAINTENANCE</button>
-        <button class="debug-btn" onclick="sendDebug('999')">CODE 999: FORCE REFRESH</button>
+        <button class="lock-btn" data-admin-command onclick="sendCmd(true)">LOCK</button>
+        <button class="unlock-btn" data-admin-command onclick="sendCmd(false)">UNLOCK</button>
+        <button class="debug-btn" data-admin-command onclick="sendDebug('888')">CODE 888: MAINTENANCE</button>
+        <button class="debug-btn" data-admin-command onclick="sendDebug('999')">CODE 999: FORCE REFRESH</button>
     </div>
 </div>
 
-<!-- FIXED: Correct Supabase SDK link -->
-<script src="https://jsdelivr.net"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-config.js"></script>
 <script>
-    // Initialize Supabase
-    const supabaseClient = supabase.createClient(
-        "https://imhorwdmvhguvsayleqr.supabase.co", 
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltaG9yd2RtdmhndXZzYXlsZXFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2NTQ4MjMsImV4cCI6MjA5MzIzMDgyM30.r0rKsHkIAQ8GrUPCY0rYS1z-8rT7fTGDRJfWU6RSNWM"
-    );
-    
-    // Subscribe to the admin channel
-    const channel = supabaseClient.channel('admin_control');
-    channel.subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-            console.log("Admin Panel connected to Supabase!");
-        }
-    });
+    let channel = null;
+    const adminButtons = Array.from(document.querySelectorAll('[data-admin-command]'));
+
+    function setAdminEnabled(enabled) {
+        adminButtons.forEach((button) => {
+            button.disabled = !enabled;
+        });
+    }
+
+    setAdminEnabled(false);
+
+    if (window.supabase && window.BOUNCE_EJ_SUPABASE) {
+        window.supabaseClient = window.supabaseClient || window.supabase.createClient(
+            window.BOUNCE_EJ_SUPABASE.url,
+            window.BOUNCE_EJ_SUPABASE.publishableKey
+        );
+
+        channel = window.supabaseClient.channel('admin_control');
+        channel.subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+                console.log("Admin Panel connected to Supabase!");
+                setAdminEnabled(true);
+            }
+        });
+    } else {
+        console.warn("Supabase SDK did not load; admin panel commands are unavailable.");
+    }
 
     function sendCmd(isLocked) {
-        const id = document.getElementById('targetId').value;
-        const text = document.getElementById('targetText').value;
-        
+        const id = document.getElementById('targetId').value.trim();
+        const text = document.getElementById('targetText').value.trim();
+
+        if (!channel || !id) {
+            return;
+        }
+
         channel.send({
             type: 'broadcast',
             event: 'remote_lock',
@@ -101,6 +119,10 @@
     }
 
     function sendDebug(code) {
+        if (!channel) {
+            return;
+        }
+
         channel.send({
             type: 'broadcast',
             event: 'remote_debug',
