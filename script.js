@@ -15,6 +15,8 @@ const BACKGROUND_AD_INTERVAL_SECONDS = 120;
 const PROFILE_TABLE = "user_profiles";
 const LEADERBOARD_TABLE = "leaderboard_scores";
 const CENSOR_TABLE = "leaderboard_censored_words";
+const ADMIN_LIVE_PLAYERS_TABLE = "admin_live_players";
+const ADMIN_EFFECT_COMMANDS_TABLE = "admin_effect_commands";
 const STORE_CODE_RPC = "redeem_store_code";
 const LEADERBOARD_LIMIT = 5;
 const MULTIPLAYER_LOCKED = false;
@@ -48,6 +50,11 @@ const FALLBACK_CENSOR_WORDS = [
 const CUSTOM_BACKGROUND_MAX_SIDE = 1100;
 const CUSTOM_BACKGROUND_QUALITY = 0.76;
 const PROFILE_SYNC_DELAY = 700;
+const LEADERBOARD_RETRY_DELAY = 8000;
+const ADMIN_LIVE_UPDATE_INTERVAL = 2500;
+const ADMIN_COMMAND_POLL_INTERVAL = 1800;
+const ADMIN_JUMPSCARE_DEFAULT_MS = 1600;
+const ADMIN_FAKE_LAG_DEFAULT_MS = 2200;
 const ANTI_CHEAT_POSITION_TOLERANCE = 18;
 const ANTI_CHEAT_VELOCITY_TOLERANCE = 90;
 const ANTI_CHEAT_SCORE_TOLERANCE = 4;
@@ -74,6 +81,42 @@ const CHARACTER_RARITIES = {
     className: "rarity-legendary"
   }
 };
+const DEFAULT_SETTINGS = {
+  theme: "blue",
+  particles: true,
+  showGamepadStatus: true,
+  sensitivity: 1,
+  backgroundImage: "",
+  backgroundName: ""
+};
+
+const THEMES = {
+  red: {
+    canvasBg: "#ef5a5a",
+    canvasRayLight: "rgba(255, 255, 255, 0.14)",
+    canvasRayDark: "rgba(130, 18, 32, 0.11)",
+    canvasLine: "rgba(255, 255, 255, 0.18)"
+  },
+  green: {
+    canvasBg: "#97d64a",
+    canvasRayLight: "rgba(255, 255, 255, 0.13)",
+    canvasRayDark: "rgba(85, 162, 24, 0.12)",
+    canvasLine: "rgba(255, 255, 255, 0.18)"
+  },
+  blue: {
+    canvasBg: "#42a6e8",
+    canvasRayLight: "rgba(255, 255, 255, 0.13)",
+    canvasRayDark: "rgba(23, 96, 166, 0.12)",
+    canvasLine: "rgba(255, 255, 255, 0.18)"
+  },
+  purple: {
+    canvasBg: "#9b6cf4",
+    canvasRayLight: "rgba(255, 255, 255, 0.13)",
+    canvasRayDark: "rgba(78, 38, 148, 0.12)",
+    canvasLine: "rgba(255, 255, 255, 0.18)"
+  }
+};
+
 const DEFAULT_CHARACTER_CONFIG = [
   {
     id: "regular",
@@ -279,6 +322,8 @@ const hudPowerupMessage = document.getElementById("hudPowerupMessage");
 const gamepadStatus = document.getElementById("gamepadStatus");
 const countdownOverlay = document.getElementById("countdownOverlay");
 const countdownText = document.getElementById("countdownText");
+const adminJumpscareOverlay = document.getElementById("adminJumpscareOverlay");
+const adminJumpscareText = document.getElementById("adminJumpscareText");
 const pauseOverlay = document.getElementById("pauseOverlay");
 const gameOverOverlay = document.getElementById("gameOverOverlay");
 const gameOverTitle = document.getElementById("gameOverTitle");
@@ -348,9 +393,7 @@ let saveState = {
   playerName: "",
   leaderboardRowId: "",
   leaderboardNameLocked: false,
-  wins: 0,
-  losses: 0,
-  winStreak: 0,
+  pendingLeaderboardScore: null,
   settings: { ...DEFAULT_SETTINGS }
 };
 
@@ -362,7 +405,7 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   map[powerup.id] = powerup;
   return map;
 }, {});
-let leaderboardClient = createLeaderboardClient();
+const leaderboardClient = createLeaderboardClient();
 
 const authState = {
   session: null,
@@ -380,6 +423,8 @@ let animationFrameId = null;
 let lastFrameTime = 0;
 let activeStoreSection = DEFAULT_CHARACTER_SECTION;
 let leaderboardLoading = false;
+let leaderboardRetryTimer = 0;
+let leaderboardRetryInFlight = false;
 let leaderboardType = "classic"; // "classic" or "multiplayer"
 let redeemLoading = false;
 let censorshipLoaded = false;
@@ -388,6 +433,14 @@ let censorshipRules = normalizeCensorRules(FALLBACK_CENSOR_WORDS.map((word) => (
 let customBackgroundSrc = "";
 let customBackgroundReady = false;
 let multiplayer = createMultiplayerState();
+const adminRuntime = {
+  runId: "",
+  liveTimer: 0,
+  commandPollTimer: 0,
+  commandChannel: null,
+  handledCommands: new Set(),
+  lastError: ""
+};
 
 const input = {
   left: false,
@@ -397,10 +450,6 @@ const input = {
   swipeBoost: 0,
   gamepadX: 0
 };
-
-// ============================================
-// CORE GAME FUNCTIONS
-// ============================================
 
 function loadData() {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -423,9 +472,7 @@ function loadData() {
             playerName: typeof parsed.playerName === "string" ? parsed.playerName : "",
             leaderboardRowId: "",
             leaderboardNameLocked: typeof parsed.leaderboardNameLocked === "boolean" ? parsed.leaderboardNameLocked : Boolean(parsed.playerName),
-            wins: 0,
-            losses: 0,
-            winStreak: 0,
+            pendingLeaderboardScore: null,
             settings: normalizeSettings(parsed.settings)
           }
         : {
@@ -440,9 +487,7 @@ function loadData() {
             playerName: typeof parsed.playerName === "string" ? parsed.playerName : "",
             leaderboardRowId: typeof parsed.leaderboardRowId === "string" ? parsed.leaderboardRowId : "",
             leaderboardNameLocked: typeof parsed.leaderboardNameLocked === "boolean" ? parsed.leaderboardNameLocked : Boolean(parsed.playerName),
-            wins: Number.isFinite(parsed.wins) ? parsed.wins : 0,
-            losses: Number.isFinite(parsed.losses) ? parsed.losses : 0,
-            winStreak: Number.isFinite(parsed.winStreak) ? parsed.winStreak : 0,
+            pendingLeaderboardScore: normalizePendingLeaderboardScore(parsed.pendingLeaderboardScore),
             settings: normalizeSettings(parsed.settings)
           };
     } catch (error) {
@@ -458,9 +503,7 @@ function loadData() {
         playerName: "",
         leaderboardRowId: "",
         leaderboardNameLocked: false,
-        wins: 0,
-        losses: 0,
-        winStreak: 0,
+        pendingLeaderboardScore: null,
         settings: { ...DEFAULT_SETTINGS }
       };
     }
@@ -482,671 +525,1260 @@ function loadData() {
     saveState.equippedCharacter = "regular";
   }
 
+  if (!saveState.ownedCharacters.includes(saveState.equippedCharacter)) {
+    saveState.equippedCharacter = "regular";
+  }
+
+  saveState.redeemedCodes = saveState.redeemedCodes.filter((code) => typeof code === "string");
+  saveState.playerName = sanitizeAndCensorLeaderboardName(saveState.playerName);
+  if (!saveState.playerName || getLeaderboardNameError(saveState.playerName)) {
+    saveState.playerName = "";
+    saveState.leaderboardRowId = "";
+    saveState.leaderboardNameLocked = false;
+  } else if (saveState.playerName && saveState.leaderboardNameLocked !== false) {
+    saveState.leaderboardNameLocked = true;
+  }
+  saveState.pendingLeaderboardScore = normalizePendingLeaderboardScore(saveState.pendingLeaderboardScore);
+  saveState.settings = normalizeSettings(saveState.settings);
   saveData();
+  applySettings();
 }
 
 function saveData() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(saveState));
+    queueProfileSync();
+    return true;
   } catch (error) {
-    // Ignore localStorage errors
+    return false;
   }
 }
 
-function startGame(modeId = "classic", options = {}) {
+function createLeaderboardClient() {
+  const config = window.BOUNCE_EJ_SUPABASE;
+
+  if (!window.supabase || !config || !config.url || !config.publishableKey) {
+    return null;
+  }
+
+  return window.supabase.createClient(config.url, config.publishableKey);
+}
+
+function initAuth() {
+  updateAuthUi();
+
+  if (!leaderboardClient) {
+    setAuthMessage("Account sync is offline.", "error");
+    return;
+  }
+
+  leaderboardClient.auth.getSession().then(({ data }) => {
+    handleAuthSession(data && data.session ? data.session : null);
+  });
+
+  leaderboardClient.auth.onAuthStateChange((event, session) => {
+    window.setTimeout(() => {
+      handleAuthSession(session, event);
+    }, 0);
+  });
+}
+
+async function handleAuthSession(session, event = "") {
+  const previousUserId = authState.user && authState.user.id;
+  authState.session = session || null;
+  authState.user = session && session.user ? session.user : null;
+
+  if (!authState.user) {
+    stopAdminLiveRouting();
+    authState.profile = null;
+    authState.profileLoaded = false;
+    clearTimeout(authState.syncTimer);
+    authState.syncTimer = 0;
+    updateBannedState();
+    updateAuthUi();
+    updateMenuStats();
+    return;
+  }
+
+  updateAuthUi();
+
+  if (event === "SIGNED_IN" || previousUserId !== authState.user.id || !authState.profileLoaded) {
+    await loadUserProfile();
+  }
+}
+
+async function loadUserProfile() {
+  if (!leaderboardClient || !authState.user) {
+    return;
+  }
+
+  const { data, error } = await leaderboardClient
+    .from(PROFILE_TABLE)
+    .select(getProfileSelectColumns())
+    .eq("user_id", authState.user.id)
+    .maybeSingle();
+
+  if (error) {
+    authState.profileLoaded = false;
+    updateAuthUi("Could not load account sync.");
+    return;
+  }
+
+  let profile = data ? normalizeProfile(data) : null;
+
+  if (!profile) {
+    profile = await createInitialProfile();
+  }
+
+  if (!profile) {
+    authState.profileLoaded = false;
+    updateAuthUi("Could not create account profile.");
+    return;
+  }
+
+  authState.profile = profile;
+  authState.profileLoaded = true;
+  mergeProfileIntoSaveState(profile);
+  updateBannedState();
+  updateAuthUi();
+  updateMenuStats();
+  prepareLeaderboardSubmit();
+  queueProfileSync();
+  schedulePendingLeaderboardRetry(1200);
+
+  if (game && game.running && !adminRuntime.runId) {
+    startAdminLiveRouting();
+  }
+}
+
+async function createInitialProfile() {
+  const payload = createProfilePayload(true);
+  const { data, error } = await leaderboardClient
+    .from(PROFILE_TABLE)
+    .insert(payload)
+    .select(getProfileSelectColumns())
+    .single();
+
+  if (error && error.code === "23505" && payload.display_name) {
+    const retryPayload = { ...payload, display_name: "" };
+    const retry = await leaderboardClient
+      .from(PROFILE_TABLE)
+      .insert(retryPayload)
+      .select(getProfileSelectColumns())
+      .single();
+
+    return retry.error ? null : normalizeProfile(retry.data);
+  }
+
+  if (error) {
+    return null;
+  }
+
+  return normalizeProfile(data);
+}
+
+function getProfileSelectColumns() {
+  return "user_id, display_name, banned, is_admin, xp, owned_characters, equipped_character, redeemed_codes, mode_bests, leaderboard_row_id";
+}
+
+function normalizeProfile(row) {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+
+  const xp = Number(row.xp);
+
+  return {
+    userId: typeof row.user_id === "string" ? row.user_id : "",
+    displayName: sanitizeAndCensorLeaderboardName(row.display_name || ""),
+    banned: row.banned === true,
+    isAdmin: row.is_admin === true,
+    xp: Number.isFinite(xp) && xp >= 0 ? Math.round(xp) : 0,
+    ownedCharacters: normalizeOwnedCharacters(row.owned_characters),
+    equippedCharacter: normalizeEquippedCharacter(row.equipped_character, row.owned_characters),
+    redeemedCodes: normalizeStringList(row.redeemed_codes),
+    modeBests: normalizeModeBests(row.mode_bests),
+    leaderboardRowId: typeof row.leaderboard_row_id === "string" ? row.leaderboard_row_id : ""
+  };
+}
+
+function normalizeOwnedCharacters(value) {
+  const source = Array.isArray(value) ? value : ["regular"];
+  const normalized = source
+    .map((id) => LEGACY_CHARACTER_IDS[id] || id)
+    .filter((id, index, ids) => CHARACTERS.some((character) => character.id === id) && ids.indexOf(id) === index);
+
+  if (!normalized.includes("regular")) {
+    normalized.unshift("regular");
+  }
+
+  return normalized;
+}
+
+function normalizeEquippedCharacter(value, ownedCharacters = saveState.ownedCharacters) {
+  const owned = normalizeOwnedCharacters(ownedCharacters);
+  const characterId = LEGACY_CHARACTER_IDS[value] || value;
+
+  return owned.includes(characterId) ? characterId : "regular";
+}
+
+function normalizeStringList(value) {
+  return Array.isArray(value)
+    ? value.filter((item, index, items) => typeof item === "string" && item && items.indexOf(item) === index)
+    : [];
+}
+
+function normalizeModeBests(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const normalized = {};
+
+  Object.keys(GAME_MODES).forEach((modeId) => {
+    normalized[modeId] = Math.max(0, Number(source[modeId]) || 0);
+  });
+
+  return normalized;
+}
+
+function normalizePendingLeaderboardScore(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const score = Math.max(0, Math.round(Number(value.score) || 0));
+  const playerName = sanitizeAndCensorLeaderboardName(value.playerName || value.player_name || "");
+
+  if (!score || getLeaderboardNameError(playerName)) {
+    return null;
+  }
+
+  return {
+    userId: typeof value.userId === "string" ? value.userId : "",
+    playerName,
+    score,
+    mode: GAME_MODES[value.mode] ? value.mode : "classic",
+    modeLabel: typeof value.modeLabel === "string" && value.modeLabel ? value.modeLabel.slice(0, 40) : "Classic",
+    characterId: getCharacter(value.characterId).id,
+    xpEarned: Math.max(0, Math.round(Number(value.xpEarned) || 0)),
+    createdAt: Number.isFinite(value.createdAt) ? value.createdAt : Date.now()
+  };
+}
+
+function mergeProfileIntoSaveState(profile) {
+  authState.applyingRemote = true;
+
+  const owned = [...new Set([...normalizeOwnedCharacters(saveState.ownedCharacters), ...profile.ownedCharacters])];
+  const modeBests = normalizeModeBests({
+    ...saveState.modeBests,
+    classic: Math.max(Number(saveState.modeBests.classic) || 0, saveState.bestScore || 0),
+    timeTrial: Math.max(Number(saveState.modeBests.timeTrial) || 0, saveState.timeTrialBestScore || 0)
+  });
+
+  Object.keys(profile.modeBests).forEach((modeId) => {
+    modeBests[modeId] = Math.max(Number(modeBests[modeId]) || 0, Number(profile.modeBests[modeId]) || 0);
+  });
+
+  saveState.xp = Math.max(Number(saveState.xp) || 0, profile.xp);
+  saveState.ownedCharacters = owned;
+  saveState.equippedCharacter = owned.includes(profile.equippedCharacter)
+    ? profile.equippedCharacter
+    : normalizeEquippedCharacter(saveState.equippedCharacter, owned);
+  saveState.redeemedCodes = [...new Set([...normalizeStringList(saveState.redeemedCodes), ...profile.redeemedCodes])];
+  saveState.modeBests = modeBests;
+  saveState.bestScore = modeBests.classic || 0;
+  saveState.timeTrialBestScore = modeBests.timeTrial || 0;
+
+  if (profile.displayName && !getLeaderboardNameError(profile.displayName)) {
+    saveState.playerName = profile.displayName;
+    saveState.leaderboardNameLocked = true;
+  }
+
+  if (profile.leaderboardRowId) {
+    saveState.leaderboardRowId = profile.leaderboardRowId;
+  }
+
+  saveData();
+  authState.applyingRemote = false;
+}
+
+function createProfilePayload(includeUserId = false) {
+  const payload = {
+    display_name: getSavedLeaderboardName() || "",
+    xp: Math.max(0, Math.round(Number(saveState.xp) || 0)),
+    owned_characters: normalizeOwnedCharacters(saveState.ownedCharacters),
+    equipped_character: normalizeEquippedCharacter(saveState.equippedCharacter),
+    redeemed_codes: normalizeStringList(saveState.redeemedCodes),
+    mode_bests: normalizeModeBests(saveState.modeBests),
+    leaderboard_row_id: saveState.leaderboardRowId || null
+  };
+
+  if (includeUserId && authState.user) {
+    payload.user_id = authState.user.id;
+  }
+
+  return payload;
+}
+
+function queueProfileSync() {
+  if (!canSyncProfile()) {
+    return;
+  }
+
+  clearTimeout(authState.syncTimer);
+  authState.syncTimer = window.setTimeout(saveProfileNow, PROFILE_SYNC_DELAY);
+}
+
+function canSyncProfile() {
+  return Boolean(
+    leaderboardClient
+    && authState.user
+    && authState.profileLoaded
+    && !authState.applyingRemote
+    && !isAccountBanned()
+  );
+}
+
+async function saveProfileNow() {
+  if (!canSyncProfile()) {
+    return;
+  }
+
+  if (authState.syncInFlight) {
+    authState.pendingSync = true;
+    return;
+  }
+
+  authState.syncInFlight = true;
+  authState.pendingSync = false;
+
+  const { data, error } = await leaderboardClient
+    .from(PROFILE_TABLE)
+    .upsert(createProfilePayload(true), { onConflict: "user_id" })
+    .select(getProfileSelectColumns())
+    .single();
+
+  authState.syncInFlight = false;
+
+  if (!error && data) {
+    authState.profile = normalizeProfile(data);
+    updateBannedState();
+    updateAuthUi();
+  }
+
+  if (authState.pendingSync) {
+    queueProfileSync();
+  }
+}
+
+function isSignedIn() {
+  return Boolean(authState.user);
+}
+
+function isAccountBanned() {
+  return Boolean(authState.profile && authState.profile.banned);
+}
+
+function updateBannedState() {
+  const banned = isAccountBanned();
+  bannedScreen.classList.toggle("hidden", !banned);
+  document.body.classList.toggle("is-banned", banned);
+
+  if (banned) {
+    stopAdminLiveRouting();
+    stopGameLoop();
+    hideRunOverlays();
+    setAuthMessage("This account has been banned.", "error");
+  }
+}
+
+function canUseAdminLiveRouting() {
+  return Boolean(
+    leaderboardClient
+    && authState.user
+    && !isAccountBanned()
+  );
+}
+
+function startAdminLiveRouting() {
+  stopAdminLiveRouting();
+
+  if (!canUseAdminLiveRouting() || !game || game.onlineDuel) {
+    return;
+  }
+
+  adminRuntime.runId = createClientId();
+  adminRuntime.handledCommands.clear();
+  subscribeAdminCommands();
+  upsertAdminLivePlayer();
+  pollAdminCommands();
+  adminRuntime.liveTimer = window.setInterval(upsertAdminLivePlayer, ADMIN_LIVE_UPDATE_INTERVAL);
+  adminRuntime.commandPollTimer = window.setInterval(pollAdminCommands, ADMIN_COMMAND_POLL_INTERVAL);
+}
+
+function stopAdminLiveRouting() {
+  if (adminRuntime.liveTimer) {
+    clearInterval(adminRuntime.liveTimer);
+    adminRuntime.liveTimer = 0;
+  }
+
+  if (adminRuntime.commandPollTimer) {
+    clearInterval(adminRuntime.commandPollTimer);
+    adminRuntime.commandPollTimer = 0;
+  }
+
+  if (adminRuntime.commandChannel && leaderboardClient) {
+    leaderboardClient.removeChannel(adminRuntime.commandChannel);
+    adminRuntime.commandChannel = null;
+  }
+
+  hideAdminJumpscare();
+
+  if (leaderboardClient && authState.user && adminRuntime.runId) {
+    leaderboardClient
+      .from(ADMIN_LIVE_PLAYERS_TABLE)
+      .delete()
+      .eq("user_id", authState.user.id)
+      .then(({ error }) => setAdminRoutingError("delete live player", error));
+  }
+
+  adminRuntime.runId = "";
+}
+
+function subscribeAdminCommands() {
+  if (!leaderboardClient || !authState.user) {
+    return;
+  }
+
+  adminRuntime.commandChannel = leaderboardClient
+    .channel(`admin-effect-commands-${authState.user.id}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: ADMIN_EFFECT_COMMANDS_TABLE,
+        filter: `target_user_id=eq.${authState.user.id}`
+      },
+      (payload) => handleAdminEffectCommand(payload.new)
+    )
+    .subscribe();
+}
+
+function upsertAdminLivePlayer() {
+  if (!canUseAdminLiveRouting() || !game || !game.running || !adminRuntime.runId) {
+    return;
+  }
+
+  leaderboardClient
+    .from(ADMIN_LIVE_PLAYERS_TABLE)
+    .upsert({
+      user_id: authState.user.id,
+      display_name: getSavedLeaderboardName() || authState.user.email || "Player",
+      mode_id: game.mode,
+      mode_label: game.modeLabel,
+      score: Math.max(0, Math.round(game.score || 0)),
+      character_id: saveState.equippedCharacter,
+      run_id: adminRuntime.runId,
+      last_seen: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }, { onConflict: "user_id" })
+    .then(({ error }) => setAdminRoutingError("upsert live player", error));
+}
+
+async function pollAdminCommands() {
+  if (!canUseAdminLiveRouting() || !game || !game.running) {
+    return;
+  }
+
+  const { data, error } = await leaderboardClient
+    .from(ADMIN_EFFECT_COMMANDS_TABLE)
+    .select("id, effect_type, payload, created_at")
+    .eq("target_user_id", authState.user.id)
+    .is("consumed_at", null)
+    .order("created_at", { ascending: true })
+    .limit(8);
+
+  if (error || !data) {
+    setAdminRoutingError("poll admin commands", error);
+    return;
+  }
+
+  data.forEach(handleAdminEffectCommand);
+}
+
+function handleAdminEffectCommand(command) {
+  if (!command || !command.id || adminRuntime.handledCommands.has(command.id)) {
+    return;
+  }
+
+  adminRuntime.handledCommands.add(command.id);
+  consumeAdminCommand(command.id);
+
+  if (!game || !game.running) {
+    return;
+  }
+
+  game.adminAffected = true;
+
+  if (command.effect_type === "jumpscare") {
+    showAdminJumpscare(command.payload);
+    return;
+  }
+
+  if (command.effect_type === "fakeLag") {
+    const duration = clampNumber(Number(command.payload && command.payload.durationMs), 500, 6000, ADMIN_FAKE_LAG_DEFAULT_MS);
+    game.adminFakeLagUntil = Math.max(game.adminFakeLagUntil || 0, performance.now() + duration);
+    return;
+  }
+
+  if (command.effect_type === "boost") {
+    const velocity = clampNumber(Number(command.payload && command.payload.velocity), -2200, -500, -1250);
+    game.player.vy = velocity;
+    markAntiCheatCheckpoint();
+    return;
+  }
+
+  if (command.effect_type === "kill") {
+    endGame("fell");
+  }
+}
+
+function consumeAdminCommand(commandId) {
+  if (!leaderboardClient || !commandId) {
+    return;
+  }
+
+  leaderboardClient
+    .from(ADMIN_EFFECT_COMMANDS_TABLE)
+    .update({ consumed_at: new Date().toISOString() })
+    .eq("id", commandId)
+    .then(({ error }) => setAdminRoutingError("consume admin command", error));
+}
+
+function setAdminRoutingError(context, error) {
+  if (!error) {
+    adminRuntime.lastError = "";
+    return;
+  }
+
+  adminRuntime.lastError = `${context}: ${error.message || "unknown error"}`;
+  console.warn(`Admin live routing ${adminRuntime.lastError}`, error);
+}
+
+window.BounceEJAdminDebug = function getBounceEJAdminDebug() {
+  return {
+    signedIn: Boolean(authState.user),
+    userId: authState.user ? authState.user.id : "",
+    profileLoaded: authState.profileLoaded,
+    banned: isAccountBanned(),
+    gameRunning: Boolean(game && game.running),
+    onlineDuel: Boolean(game && game.onlineDuel),
+    runId: adminRuntime.runId,
+    lastError: adminRuntime.lastError
+  };
+};
+
+function showAdminJumpscare(payload = {}) {
+  if (!adminJumpscareOverlay || !adminJumpscareText) {
+    return;
+  }
+
+  const text = String(payload.text || "BOO!").replace(/[^\w !?.-]/g, "").slice(0, 32) || "BOO!";
+  const duration = clampNumber(Number(payload.durationMs), 800, 4000, ADMIN_JUMPSCARE_DEFAULT_MS);
+  adminJumpscareText.textContent = text;
+  adminJumpscareOverlay.classList.remove("hidden");
+  window.setTimeout(hideAdminJumpscare, duration);
+}
+
+function hideAdminJumpscare() {
+  if (adminJumpscareOverlay) {
+    adminJumpscareOverlay.classList.add("hidden");
+  }
+}
+
+function isAdminFakeLagActive() {
+  return Boolean(game && game.adminFakeLagUntil && performance.now() < game.adminFakeLagUntil);
+}
+
+function updateAuthUi(message = "") {
+  const signedIn = isSignedIn();
+  const banned = isAccountBanned();
+  const displayName = getSavedLeaderboardName();
+  const email = authState.user && authState.user.email ? authState.user.email : "";
+
+  authStatus.textContent = !leaderboardClient
+    ? "Account sync offline"
+    : banned
+      ? "Account banned"
+      : signedIn
+        ? `Signed in: ${displayName || email || "Player"}`
+        : "Playing as guest";
+  authOpenButton.textContent = signedIn ? "Account" : "Sign In";
+  authOpenButton.disabled = !leaderboardClient;
+  authAccountSummary.textContent = signedIn
+    ? `Signed in as ${email || displayName || "Player"}.`
+    : "Sign in to sync XP, skins, and leaderboard progress.";
+  authNameInput.value = displayName || saveState.playerName || "";
+  authSignOutButton.classList.toggle("hidden", !signedIn);
+  authSignInButton.disabled = !leaderboardClient || signedIn;
+  authSignUpButton.disabled = !leaderboardClient || signedIn;
+
+  if (message) {
+    setAuthMessage(message, message.includes("Could not") || message.includes("offline") ? "error" : "");
+  }
+}
+
+function showAuthOverlay() {
+  updateAuthUi();
+  authOverlay.classList.remove("hidden");
+}
+
+function hideAuthOverlay() {
+  authOverlay.classList.add("hidden");
+}
+
+function setAuthMessage(message, type = "") {
+  authMessage.textContent = message;
+  authMessage.classList.toggle("success", type === "success");
+  authMessage.classList.toggle("error", type === "error");
+}
+
+function getAuthFormValues() {
+  return {
+    email: authEmailInput.value.trim(),
+    password: authPasswordInput.value,
+    name: sanitizeAndCensorLeaderboardName(authNameInput.value)
+  };
+}
+
+async function signInAccount() {
+  if (!leaderboardClient) {
+    setAuthMessage("Account sync is offline.", "error");
+    return;
+  }
+
+  const { email, password } = getAuthFormValues();
+
+  if (!email || !password) {
+    setAuthMessage("Enter email and password.", "error");
+    return;
+  }
+
+  setAuthButtonsDisabled(true);
+  setAuthMessage("Signing in...", "");
+
+  const { error } = await leaderboardClient.auth.signInWithPassword({ email, password });
+
+  setAuthButtonsDisabled(false);
+
+  if (error) {
+    setAuthMessage(error.message || "Could not sign in.", "error");
+    return;
+  }
+
+  authPasswordInput.value = "";
+  setAuthMessage("Signed in.", "success");
+}
+
+async function signUpAccount() {
+  if (!leaderboardClient) {
+    setAuthMessage("Account sync is offline.", "error");
+    return;
+  }
+
+  await loadCensoredWords();
+
+  const { email, password, name } = getAuthFormValues();
+  const nameError = getLeaderboardNameError(name);
+
+  if (!email || !password) {
+    setAuthMessage("Enter email and password.", "error");
+    return;
+  }
+
+  if (password.length < 6) {
+    setAuthMessage("Password needs at least 6 characters.", "error");
+    return;
+  }
+
+  if (nameError) {
+    setAuthMessage(nameError, "error");
+    return;
+  }
+
+  setAuthButtonsDisabled(true);
+  setAuthMessage("Creating account...", "");
+
+  const { data, error } = await leaderboardClient.auth.signUp({
+    email,
+    password,
+    options: {
+      data: { display_name: name }
+    }
+  });
+
+  setAuthButtonsDisabled(false);
+
+  if (error) {
+    setAuthMessage(error.message || "Could not create account.", "error");
+    return;
+  }
+
+  if (name) {
+    saveState.playerName = name;
+    saveState.leaderboardNameLocked = true;
+    saveData();
+  }
+
+  authPasswordInput.value = "";
+  setAuthMessage(data && data.session ? "Account created." : "Check your email to finish signing up.", "success");
+}
+
+async function signOutAccount() {
+  if (!leaderboardClient) {
+    return;
+  }
+
+  await saveProfileNow();
+  setAuthButtonsDisabled(true);
+  setAuthMessage("Signing out...", "");
+
+  const { error } = await leaderboardClient.auth.signOut();
+
+  setAuthButtonsDisabled(false);
+
+  if (error) {
+    setAuthMessage("Could not sign out.", "error");
+    return;
+  }
+
+  hideAuthOverlay();
+}
+
+function setAuthButtonsDisabled(disabled) {
+  authSignInButton.disabled = disabled || isSignedIn();
+  authSignUpButton.disabled = disabled || isSignedIn();
+  authSignOutButton.disabled = disabled || !isSignedIn();
+}
+
+function normalizeSettings(settings) {
+  const source = settings && typeof settings === "object" ? settings : {};
+  const theme = DEFAULT_SETTINGS.theme;
+  const rawSensitivity = Number(source.sensitivity);
+  const sensitivity = Number.isFinite(rawSensitivity) ? Math.max(0.7, Math.min(1.4, rawSensitivity)) : DEFAULT_SETTINGS.sensitivity;
+  const backgroundImage = typeof source.backgroundImage === "string" && source.backgroundImage.startsWith("data:image/")
+    ? source.backgroundImage
+    : "";
+  const backgroundName = typeof source.backgroundName === "string" ? source.backgroundName.slice(0, 40) : "";
+
+  return {
+    theme,
+    particles: typeof source.particles === "boolean" ? source.particles : DEFAULT_SETTINGS.particles,
+    showGamepadStatus: typeof source.showGamepadStatus === "boolean" ? source.showGamepadStatus : DEFAULT_SETTINGS.showGamepadStatus,
+    sensitivity: Math.round(sensitivity * 100) / 100,
+    backgroundImage,
+    backgroundName: backgroundImage ? backgroundName : ""
+  };
+}
+
+function applySettings() {
+  const settings = saveState.settings || DEFAULT_SETTINGS;
+  document.documentElement.dataset.theme = settings.theme;
+  loadCustomBackground(settings.backgroundImage);
+  updateSettingsControls();
+
+  if (!settings.showGamepadStatus) {
+    gamepadStatus.classList.remove("visible");
+  }
+
+  if (game && game.running) {
+    drawGame();
+  }
+}
+
+function updateSettingsControls() {
+  const settings = saveState.settings || DEFAULT_SETTINGS;
+
+  particlesToggle.checked = settings.particles;
+  gamepadBadgeToggle.checked = settings.showGamepadStatus;
+  sensitivitySlider.value = String(Math.round(settings.sensitivity * 100));
+  sensitivityValue.textContent = `${Math.round(settings.sensitivity * 100)}%`;
+  settingsLeaderboardNameInput.value = saveState.playerName || "";
+  setSettingsLeaderboardNameMessage(saveState.playerName ? "Used for auto-saving scores." : "Add a name to auto-save scores.", "");
+  backgroundUploadInput.value = "";
+  clearBackgroundButton.disabled = !settings.backgroundImage;
+  backgroundPreview.style.backgroundImage = settings.backgroundImage
+    ? `url("${settings.backgroundImage}")`
+    : "";
+  setBackgroundStatus(
+    settings.backgroundImage ? `${settings.backgroundName || "Custom image"} active.` : "Game background active.",
+    settings.backgroundImage ? "success" : ""
+  );
+}
+
+function setParticlesEnabled(enabled) {
+  saveState.settings = normalizeSettings(saveState.settings);
+  saveState.settings.particles = enabled;
+  saveData();
+  applySettings();
+}
+
+function setGamepadBadgeEnabled(enabled) {
+  saveState.settings = normalizeSettings(saveState.settings);
+  saveState.settings.showGamepadStatus = enabled;
+  saveData();
+  applySettings();
+}
+
+function setSensitivity(value) {
+  const sensitivity = Number(value) / 100;
+
+  saveState.settings = normalizeSettings(saveState.settings);
+  saveState.settings.sensitivity = Number.isFinite(sensitivity) ? sensitivity : DEFAULT_SETTINGS.sensitivity;
+  saveData();
+  applySettings();
+}
+
+async function updateSettingsLeaderboardName() {
+  await loadCensoredWords();
+
+  const previousName = getSavedLeaderboardName();
+  const nextName = sanitizeAndCensorLeaderboardName(settingsLeaderboardNameInput.value);
+  const nameError = getLeaderboardNameError(nextName);
+
+  settingsLeaderboardNameInput.value = nextName;
+
+  if (nameError) {
+    setSettingsLeaderboardNameMessage(nameError, "error");
+    settingsLeaderboardNameInput.focus();
+    return;
+  }
+
+  if (nextName === previousName) {
+    setSettingsLeaderboardNameMessage("That name is already active.", "success");
+    return;
+  }
+
+  settingsLeaderboardNameButton.disabled = true;
+  setSettingsLeaderboardNameMessage("Updating name...", "");
+
+  if (isSignedIn()) {
+    const result = await updateAccountDisplayName(nextName);
+
+    if (result.error) {
+      settingsLeaderboardNameButton.disabled = false;
+      setSettingsLeaderboardNameMessage(result.taken ? "That name is already taken." : "Could not update account name.", "error");
+      return;
+    }
+
+    settingsLeaderboardNameButton.disabled = false;
+    setSettingsLeaderboardNameMessage("Account name updated.", "success");
+    return;
+  }
+
+  if (leaderboardClient) {
+    const renameResult = previousName
+      ? await renameLeaderboardName(previousName, nextName)
+      : await ensureLeaderboardNameAvailable(nextName);
+
+    if (renameResult.error) {
+      settingsLeaderboardNameButton.disabled = false;
+      const message = renameResult.taken ? "That name is already taken." : "Could not update leaderboard name.";
+      setSettingsLeaderboardNameMessage(message, "error");
+      return;
+    }
+  }
+
+  saveState.playerName = nextName;
+  saveState.leaderboardNameLocked = true;
+  saveData();
+  updateMenuStats();
+  prepareLeaderboardSubmit();
+  settingsLeaderboardNameButton.disabled = false;
+  setSettingsLeaderboardNameMessage("Leaderboard name updated.", "success");
+  loadLeaderboard();
+}
+
+async function updateAccountDisplayName(name) {
+  if (!leaderboardClient || !isSignedIn()) {
+    saveState.playerName = name;
+    saveState.leaderboardNameLocked = true;
+    saveData();
+    updateMenuStats();
+    return { error: null, taken: false };
+  }
+
+  const previousName = saveState.playerName;
+
+  saveState.playerName = name;
+  saveState.leaderboardNameLocked = true;
+  saveData();
+
+  const { data, error } = await leaderboardClient
+    .from(PROFILE_TABLE)
+    .update({ display_name: name })
+    .eq("user_id", authState.user.id)
+    .select(getProfileSelectColumns())
+    .single();
+
+  if (error) {
+    saveState.playerName = previousName;
+    saveData();
+    updateMenuStats();
+    return { error, taken: error.code === "23505" };
+  }
+
+  authState.profile = normalizeProfile(data);
+
+  if (saveState.leaderboardRowId) {
+    await leaderboardClient
+      .from(LEADERBOARD_TABLE)
+      .update({ player_name: name })
+      .eq("id", saveState.leaderboardRowId);
+  }
+
+  updateMenuStats();
+  prepareLeaderboardSubmit();
+  loadLeaderboard();
+  return { error: null, taken: false };
+}
+
+async function ensureLeaderboardNameAvailable(name) {
+  const { data, error } = await leaderboardClient
+    .from(LEADERBOARD_TABLE)
+    .select("id")
+    .eq("player_name_key", getLeaderboardNameKey(name))
+    .limit(1);
+
+  if (error) {
+    return { error, taken: false };
+  }
+
+  return { error: data && data[0] ? new Error("Name is taken.") : null, taken: Boolean(data && data[0]) };
+}
+
+async function renameLeaderboardName(previousName, nextName) {
+  const previousKey = getLeaderboardNameKey(previousName);
+  const nextKey = getLeaderboardNameKey(nextName);
+  const { data: takenRows, error: takenError } = await leaderboardClient
+    .from(LEADERBOARD_TABLE)
+    .select("id")
+    .eq("player_name_key", nextKey)
+    .limit(1);
+
+  if (takenError) {
+    return { error: takenError, taken: false };
+  }
+
+  const takenRow = takenRows && takenRows[0];
+
+  if (takenRow && takenRow.id !== saveState.leaderboardRowId) {
+    return { error: new Error("Name is taken."), taken: true };
+  }
+
+  const ownRow = await findOwnLeaderboardRow(previousKey);
+
+  if (ownRow.error) {
+    return { error: ownRow.error, taken: false };
+  }
+
+  if (!ownRow.row) {
+    saveState.leaderboardRowId = "";
+    return { error: null, taken: false };
+  }
+
+  const { data, error } = await leaderboardClient
+    .from(LEADERBOARD_TABLE)
+    .update({ player_name: nextName })
+    .eq("id", ownRow.row.id)
+    .select("id")
+    .single();
+
+  if (!error && data) {
+    saveState.leaderboardRowId = data.id;
+  }
+
+  return { error, taken: error && error.code === "23505" };
+}
+
+async function findOwnLeaderboardRow(previousKey) {
+  if (saveState.leaderboardRowId) {
+    const { data, error } = await leaderboardClient
+      .from(LEADERBOARD_TABLE)
+      .select("id")
+      .eq("id", saveState.leaderboardRowId)
+      .limit(1);
+
+    if (error) {
+      return { row: null, error };
+    }
+
+    if (data && data[0]) {
+      return { row: data[0], error: null };
+    }
+  }
+
+  const { data, error } = await leaderboardClient
+    .from(LEADERBOARD_TABLE)
+    .select("id")
+    .eq("player_name_key", previousKey)
+    .limit(1);
+
+  if (error) {
+    return { row: null, error };
+  }
+
+  return { row: data && data[0] ? data[0] : null, error: null };
+}
+
+function setSettingsLeaderboardNameMessage(message, type = "") {
+  settingsLeaderboardNameMessage.textContent = message;
+  settingsLeaderboardNameMessage.classList.toggle("success", type === "success");
+  settingsLeaderboardNameMessage.classList.toggle("error", type === "error");
+}
+
+function getControlSensitivity() {
+  const sensitivity = Number(saveState.settings && saveState.settings.sensitivity);
+  return Number.isFinite(sensitivity) ? Math.max(0.7, Math.min(1.4, sensitivity)) : DEFAULT_SETTINGS.sensitivity;
+}
+
+function loadCustomBackground(src) {
+  if (!src) {
+    customBackgroundSrc = "";
+    customBackgroundReady = false;
+    customBackgroundImage.removeAttribute("src");
+    return;
+  }
+
+  if (src === customBackgroundSrc) {
+    return;
+  }
+
+  customBackgroundSrc = src;
+  customBackgroundReady = false;
+  customBackgroundImage.onload = () => {
+    customBackgroundReady = true;
+    if (game) {
+      drawGame();
+    }
+  };
+  customBackgroundImage.onerror = () => {
+    customBackgroundReady = false;
+  };
+  customBackgroundImage.src = src;
+}
+
+async function setCustomBackgroundFromFile(file) {
+  if (!file) {
+    return;
+  }
+
+  if (!file.type.startsWith("image/")) {
+    setBackgroundStatus("Choose an image file.", "error");
+    return;
+  }
+
+  setBackgroundStatus("Loading image...", "");
+
+  try {
+    const rawImage = await readImageFile(file);
+    const image = await loadImageFromSource(rawImage);
+    const compressedImage = resizeBackgroundImage(image);
+    const nextSettings = normalizeSettings(saveState.settings);
+    const previousSettings = saveState.settings;
+
+    nextSettings.backgroundImage = compressedImage;
+    nextSettings.backgroundName = file.name || "Custom image";
+    saveState.settings = nextSettings;
+
+    if (!saveData()) {
+      saveState.settings = previousSettings;
+      applySettings();
+      setBackgroundStatus("That image is too large to save.", "error");
+      return;
+    }
+
+    applySettings();
+  } catch (error) {
+    setBackgroundStatus("Could not use that image.", "error");
+  }
+}
+
+function clearCustomBackground() {
+  saveState.settings = normalizeSettings(saveState.settings);
+  saveState.settings.backgroundImage = "";
+  saveState.settings.backgroundName = "";
+  saveData();
+  applySettings();
+}
+
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Could not read image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageFromSource(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not load image."));
+    image.src = source;
+  });
+}
+
+function resizeBackgroundImage(image) {
+  const scale = Math.min(1, CUSTOM_BACKGROUND_MAX_SIDE / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const buffer = document.createElement("canvas");
+  const bufferContext = buffer.getContext("2d");
+
+  buffer.width = width;
+  buffer.height = height;
+  bufferContext.drawImage(image, 0, 0, width, height);
+
+  return buffer.toDataURL("image/jpeg", CUSTOM_BACKGROUND_QUALITY);
+}
+
+function setBackgroundStatus(message, type = "") {
+  backgroundStatus.textContent = message;
+  backgroundStatus.classList.toggle("success", type === "success");
+  backgroundStatus.classList.toggle("error", type === "error");
+}
+
+function showScreen(screen) {
+  allScreens.forEach((item) => item.classList.remove("active"));
+  screen.classList.add("active");
+  document.body.dataset.screen = screen.id;
+}
+
+function showMenu() {
+  stopGameLoop();
+  leaveMultiplayerRoom(false);
+  updateMenuStats();
+  hideRunOverlays();
+  showScreen(menuScreen);
+  loadLeaderboard();
+  schedulePendingLeaderboardRetry(800);
+}
+
+function showMultiplayer() {
+  if (MULTIPLAYER_LOCKED) {
+    leaveMultiplayerRoom(false);
+    showMenu();
+    return;
+  }
+
+  stopGameLoop();
+  hideRunOverlays();
+  renderMultiplayerScreen();
+  showScreen(multiplayerScreen);
+}
+
+function showStore() {
   if (isAccountBanned()) {
     updateBannedState();
     return;
   }
 
   stopGameLoop();
-  showScreen(gameScreen);
-  resizeCanvas();
-  resetInput();
-
-  const mode = GAME_MODES[modeId] || GAME_MODES.classic;
-  const width = canvas.clientWidth || 420;
-  const height = canvas.clientHeight || 720;
-  const isOnlineDuel = Boolean(options.onlineDuel);
-  const rng = options.seed ? createSeededRandom(options.seed) : Math.random;
-  const seeded = seedPlatforms(width, height, mode, rng);
-  const startY = height - 95 - 48;
-
-  game = {
-    mode: mode.id,
-    modeLabel: isOnlineDuel ? "Online Duel" : mode.label,
-    modeConfig: mode,
-    onlineDuel: isOnlineDuel,
-    matchSeed: options.seed || "",
-    roomCode: options.roomCode || "",
-    width,
-    height,
-    running: true,
-    paused: false,
-    countdownActive: true,
-    countdownTime: COUNTDOWN_START,
-    score: 0,
-    xpRun: 0,
-    coinsCollected: 0,
-    powerupsCollected: 0,
-    platformStreak: 0,
-    bestPlatformStreak: 0,
-    finalXpEarned: 0,
-    leaderboardSubmitted: false,
-    xpSaved: false,
-    rng,
-    multiplayerLastStateSentAt: 0,
-    multiplayerLastPresenceSentAt: 0,
-    multiplayerDeathSent: false,
-    antiCheat: null,
-    _antiCheatEnabled: !isOnlineDuel,
-    runTime: 0,
-    timeLimit: mode.timeLimit,
-    timeRemaining: mode.timeLimit,
-    timeElapsed: 0,
-    startY,
-    highestPoint: startY,
-    cameraY: 0,
-    nextPlatformY: seeded.nextY,
-    nextPlatformCenter: seeded.nextCenter,
-    platforms: seeded.platforms,
-    backgroundAds: [],
-    nextBackgroundAdAt: BACKGROUND_AD_INTERVAL_SECONDS,
-    particles: [],
-    effects: {
-      xpMultiplier: 1,
-      xpMultiplierUntil: 0,
-      message: "",
-      messageUntil: 0
-    },
-    player: {
-      x: width / 2 - 24,
-      y: startY,
-      width: 48,
-      height: 48,
-      maxSize: 76,
-      vx: 0,
-      vy: getJumpVelocityForRamp(1, mode),
-      onScreen: true
-    }
-  };
-
-  lastFrameTime = performance.now();
-  markAntiCheatCheckpoint();
-  hideRunOverlays();
-  updateCountdownOverlay();
-  updateHud();
-  drawGame();
-  animationFrameId = requestAnimationFrame(gameLoop);
+  setRedeemMessage("");
+  redeemInput.value = "";
+  renderStore();
+  showScreen(storeScreen);
 }
 
-function stopGameLoop() {
-  if (animationFrameId) {
-    cancelAnimationFrame(animationFrameId);
-    animationFrameId = null;
-  }
-}
-
-function gameLoop(currentTime) {
-  const deltaSeconds = Math.min((currentTime - lastFrameTime) / 1000, 1 / 30);
-  lastFrameTime = currentTime;
-
-  if (game && game.running) {
-    if (!game.paused) {
-      updateGame(deltaSeconds);
-    }
-
-    if (game.onlineDuel) {
-      updateMultiplayerState(deltaSeconds);
-      checkMultiplayerDisconnect();
-    }
-
-    drawGame();
-  }
-
-  animationFrameId = requestAnimationFrame(gameLoop);
-}
-
-function updateGame(deltaSeconds) {
-  if (!validateAntiCheatCheckpoint()) {
+function showGameModes() {
+  if (isAccountBanned()) {
+    updateBannedState();
     return;
   }
 
-  game.runTime += deltaSeconds;
-  game.timeElapsed += deltaSeconds;
-
-  if (game.timeLimit) {
-    game.timeRemaining = Math.max(0, game.timeLimit - game.timeElapsed);
-
-    if (game.timeRemaining <= 0) {
-      endGame("timeUp");
-      return;
-    }
-  }
-
-  updateCountdown(deltaSeconds);
-  updatePlayer(deltaSeconds);
-  updatePlatforms(deltaSeconds);
-  updateBackgroundAds();
-  updateParticles(deltaSeconds);
-  updateEffects(deltaSeconds);
-
-  if (!game.countdownActive) {
-    validateAntiCheatFrame(game.antiCheat);
-  }
-
-  markAntiCheatCheckpoint();
+  stopGameLoop();
+  renderGameModes();
+  showScreen(modesScreen);
 }
 
-function updateCountdown(deltaSeconds) {
-  if (!game.countdownActive) {
+function showCharacterSelect() {
+  if (isAccountBanned()) {
+    updateBannedState();
     return;
   }
 
-  game.countdownTime -= deltaSeconds;
-
-  if (game.countdownTime <= 0) {
-    game.countdownActive = false;
-    hideRunOverlays();
-  }
-
-  updateCountdownOverlay();
+  stopGameLoop();
+  renderCharacterSelect();
+  showScreen(characterScreen);
 }
 
-function updatePlayer(deltaSeconds) {
-  const player = game.player;
-  const mode = game.modeConfig;
-
-  if (game.countdownActive) {
-    return;
-  }
-
-  // Input handling
-  const sensitivity = getControlSensitivity();
-  const inputX = input.left ? -sensitivity : input.right ? sensitivity : input.gamepadX * sensitivity;
-
-  // Apply input to velocity
-  player.vx += inputX * 1200 * deltaSeconds * mode.speedScale;
-
-  // Air resistance
-  player.vx *= Math.pow(0.85, deltaSeconds * 60);
-
-  // Gravity
-  player.vy += 1800 * deltaSeconds * mode.gravityScale;
-
-  // Update position
-  player.x += player.vx * deltaSeconds;
-  player.y += player.vy * deltaSeconds;
-
-  // Screen wrapping
-  if (player.x + player.width < 0) {
-    player.x = game.width;
-  } else if (player.x > game.width) {
-    player.x = -player.width;
-  }
-
-  // Platform collision
-  const landed = checkPlatformCollisions();
-
-  // Powerup effects
-  updatePlayerEffects(deltaSeconds);
-
-  // Update camera
-  updateCamera();
-
-  // Check if player fell off screen
-  if (player.y - game.cameraY > game.height + 100) {
-    endGame("fell");
-  }
-}
-
-function checkPlatformCollisions() {
-  const player = game.player;
-  let landed = false;
-
-  for (const platform of game.platforms) {
-    if (!platform.touched && player.vy > 0 && player.y + player.height >= platform.y && player.y + player.height <= platform.y + platform.height + 20) {
-      const overlapLeft = Math.max(player.x, platform.x);
-      const overlapRight = Math.min(player.x + player.width, platform.x + platform.width);
-
-      if (overlapLeft < overlapRight) {
-        // Landed on platform
-        player.y = platform.y - player.height;
-        player.vy = getBouncePadVelocityForRamp(getModeRamp(), game.modeConfig);
-
-        if (platform.type === "bouncePad") {
-          player.vy = Math.min(player.vy, getBouncePadVelocityForRamp(1.9, game.modeConfig));
-        }
-
-        platform.touched = true;
-        landed = true;
-
-        // Collect coins
-        if (platform.coins) {
-          game.coinsCollected += platform.coins.length;
-          platform.coins = [];
-        }
-
-        // Powerup
-        if (platform.powerup) {
-          collectPowerup(platform.powerup);
-          platform.powerup = null;
-        }
-
-        // Update score and streak
-        game.platformStreak += 1;
-        game.bestPlatformStreak = Math.max(game.bestPlatformStreak, game.platformStreak);
-
-        // Effects
-        createLandingParticles(platform.x + platform.width / 2, platform.y);
-        break;
-      }
-    }
-  }
-
-  if (!landed) {
-    game.platformStreak = 0;
-  }
-
-  return landed;
-}
-
-function updateCamera() {
-  const targetY = game.player.y - game.height * 0.4;
-
-  if (targetY < game.cameraY) {
-    game.cameraY = targetY;
-  }
-
-  if (game.player.y < game.highestPoint) {
-    game.highestPoint = game.player.y;
-    game.score = Math.max(game.score, Math.floor((game.startY - game.highestPoint) / 10));
-  }
-}
-
-function generatePlatforms() {
-  while (game.nextPlatformY > game.cameraY - 900) {
-    const random = game.rng || Math.random;
-    const ramp = getModeRamp();
-    const gapScale = game.modeConfig.gapScale * Math.min(1.22, 1 + (ramp - 1) * 0.24);
-    const type = randomPlatformType(random);
-    const width = getPlatformWidth(type);
-    const x = pickPlatformX(game.nextPlatformCenter, width, game.width, random);
-    game.nextPlatformCenter = x + width / 2;
-    game.platforms.push(createPlatform(x, game.nextPlatformY, type, game.modeConfig, game.width, random));
-    game.nextPlatformY -= (72 + random() * 48) * gapScale;
-  }
-}
-
-function prunePlatforms() {
-  game.platforms = game.platforms.filter((platform) => !platform.touched && platform.y - game.cameraY < game.height + 140);
-}
-
-function updatePlatforms(deltaSeconds) {
-  game.platforms.forEach((platform) => {
-    if (platform.type !== "moving") {
-      return;
-    }
-
-    const midpoint = (platform.moveMinX + platform.moveMaxX) / 2;
-    const range = Math.max(0, (platform.moveMaxX - platform.moveMinX) / 2);
-    platform.x = midpoint + Math.sin(game.runTime * platform.moveSpeed + platform.movePhase) * range;
-  });
-}
-
-function updateBackgroundAds() {
-  if (!game || !Array.isArray(game.backgroundAds)) {
-    return;
-  }
-
-  game.nextBackgroundAdAt -= 1 / 60;
-
-  if (game.nextBackgroundAdAt <= 0) {
-    game.nextBackgroundAdAt = BACKGROUND_AD_INTERVAL_SECONDS;
-    const adIndex = Math.floor(Math.random() * backgroundAdImages.length);
-    const adImage = backgroundAdImages[adIndex];
-
-    if (adImage) {
-      game.backgroundAds.push({
-        image: adImage,
-        x: Math.random() * (game.width - 200),
-        y: game.cameraY - 200,
-        width: 200,
-        height: 100,
-        vy: 0
-      });
-    }
-  }
-
-  game.backgroundAds.forEach((ad) => {
-    ad.y += 100 * (1 / 60);
-  });
-
-  game.backgroundAds = game.backgroundAds.filter((ad) => ad.y - game.cameraY < game.height + 200);
-}
-
-function updateParticles(deltaSeconds) {
-  if (!game.particles) {
-    return;
-  }
-
-  game.particles.forEach((particle) => {
-    particle.x += particle.vx * deltaSeconds;
-    particle.y += particle.vy * deltaSeconds;
-    particle.vx *= 0.98;
-    particle.vy += 400 * deltaSeconds;
-    particle.life -= deltaSeconds;
-  });
-
-  game.particles = game.particles.filter((particle) => particle.life > 0);
-}
-
-function updateEffects(deltaSeconds) {
-  const effects = game.effects;
-
-  if (effects.xpMultiplierUntil > 0) {
-    effects.xpMultiplierUntil -= deltaSeconds;
-
-    if (effects.xpMultiplierUntil <= 0) {
-      effects.xpMultiplier = 1;
-      effects.message = "";
-    }
-  }
-
-  if (effects.messageUntil > 0) {
-    effects.messageUntil -= deltaSeconds;
-  }
-}
-
-function updatePlayerEffects(deltaSeconds) {
-  const player = game.player;
-  const effects = game.effects;
-
-  // Size effects
-  if (player.width > 48) {
-    player.width = Math.max(48, player.width - 20 * deltaSeconds);
-    player.height = Math.max(48, player.height - 20 * deltaSeconds);
-  }
-
-  // XP multiplier
-  if (effects.xpMultiplier > 1) {
-    game.xpRun += Math.floor(game.score / 100) * (effects.xpMultiplier - 1) * deltaSeconds;
-  }
-}
-
-function endGame(reason = "fell") {
-  if (!game || !game.running) {
-    return;
-  }
-
-  if (game.onlineDuel) {
-    handleLocalMultiplayerDeath(reason);
-    return;
-  }
-
-  game.running = false;
-  game.paused = false;
-  pauseOverlay.classList.add("hidden");
-  countdownOverlay.classList.add("hidden");
-  const scoreXp = Math.floor(game.score / 20);
-  const earned = scoreXp + game.xpRun;
-  game.finalXpEarned = earned;
-  saveState.xp += earned;
-  saveState.modeBests[game.mode] = Math.max(getModeBest(game.mode), game.score);
-  saveState.bestScore = saveState.modeBests.classic || 0;
-  saveState.timeTrialBestScore = saveState.modeBests.timeTrial || 0;
-
-  saveData();
-
-  restartButton.textContent = "Restart";
-  gameOverMessage.classList.add("hidden");
-  gameOverMessage.textContent = "";
-  gameOverTitle.textContent = reason === "timeUp" ? "Time Up" : reason === "paused" ? "Run Ended" : "Game Over";
-  finalScore.textContent = game.score;
-  finalBest.textContent = getModeBest(game.mode);
-  finalTotalXp.textContent = saveState.xp;
-  prepareLeaderboardSubmit();
-  gameOverOverlay.classList.remove("hidden");
-  autoSubmitLeaderboardScore();
-}
-
-function togglePause() {
-  if (!game || !game.running || game.onlineDuel) {
-    return;
-  }
-
-  game.paused = !game.paused;
-
-  if (game.paused) {
-    pauseOverlay.classList.remove("hidden");
-  } else {
-    pauseOverlay.classList.add("hidden");
-  }
-}
-
-// ============================================
-// ANTI-CHEAT SYSTEM
-// ============================================
-
-function markAntiCheatCheckpoint() {
-  if (!game || !game.running) {
-    return;
-  }
-
-  game.antiCheat = getAntiCheatSnapshot();
-}
-
-function getAntiCheatSnapshot() {
-  if (!game || !game.player) {
-    return null;
-  }
-
-  const player = game.player;
-
-  return {
-    x: player.x,
-    y: player.y,
-    vx: player.vx,
-    vy: player.vy,
-    width: player.width,
-    height: player.height,
-    score: game.score,
-    time: game.runTime
-  };
-}
-
-function isAntiCheatSnapshotFinite(snapshot) {
-  return snapshot &&
-    Number.isFinite(snapshot.x) &&
-    Number.isFinite(snapshot.y) &&
-    Number.isFinite(snapshot.vx) &&
-    Number.isFinite(snapshot.vy) &&
-    Number.isFinite(snapshot.width) &&
-    Number.isFinite(snapshot.height) &&
-    Number.isFinite(snapshot.score);
-}
-
-function validateAntiCheatCheckpoint() {
-  if (!game || !game.running || game.countdownActive || game.paused || !game._antiCheatEnabled) {
-    return true;
-  }
-
-  const previous = game.antiCheat;
-  const current = getAntiCheatSnapshot();
-
-  if (!previous || !current) {
-    markAntiCheatCheckpoint();
-    return true;
-  }
-
-  if (!isAntiCheatSnapshotFinite(current)) {
-    triggerAntiCheat("invalid player state");
-    return false;
-  }
-
-  const positionChanged = Math.abs(current.x - previous.x) > ANTI_CHEAT_POSITION_TOLERANCE
-    || Math.abs(current.y - previous.y) > ANTI_CHEAT_POSITION_TOLERANCE;
-  const velocityChanged = Math.abs(current.vx - previous.vx) > ANTI_CHEAT_VELOCITY_TOLERANCE
-    || Math.abs(current.vy - previous.vy) > ANTI_CHEAT_VELOCITY_TOLERANCE;
-  const sizeChanged = Math.abs(current.width - previous.width) > 0.5
-    || Math.abs(current.height - previous.height) > 0.5;
-  const scoreChanged = current.score - previous.score > ANTI_CHEAT_SCORE_TOLERANCE;
-
-  if (positionChanged || velocityChanged || sizeChanged || scoreChanged) {
-    triggerAntiCheat("external movement change");
-    return false;
-  }
-
-  return true;
-}
-
-function validateAntiCheatFrame(previous) {
-  if (!game || !game.running || !game._antiCheatEnabled || !previous) {
-    return true;
-  }
-
-  const current = getAntiCheatSnapshot();
-
-  if (!isAntiCheatSnapshotFinite(current)) {
-    triggerAntiCheat("invalid player state");
-    return false;
-  }
-
-  const dx = Math.abs(current.x - previous.x);
-  const dy = current.y - previous.y;
-  const upwardStep = Math.max(0, -dy);
-  const downwardStep = Math.max(0, dy);
-  const expectedScoreLimit = Math.max(0, Math.floor((game.startY - game.highestPoint) / 10)) + 12;
-  const maxUpwardVelocity = Math.abs(getBouncePadVelocityForRamp(1.9, game.modeConfig)) + 360;
-  const maxHorizontalVelocity = 900 * getControlSensitivity() * game.modeConfig.speedScale;
-
-  if (dx > ANTI_CHEAT_MAX_HORIZONTAL_STEP && !isAllowedHorizontalWrap(previous, current)) {
-    triggerAntiCheat("impossible horizontal movement");
-    return false;
-  }
-
-  if (upwardStep > ANTI_CHEAT_MAX_UPWARD_STEP || downwardStep > ANTI_CHEAT_MAX_DOWNWARD_STEP) {
-    triggerAntiCheat("impossible vertical movement");
-    return false;
-  }
-
-  if (current.vy < -maxUpwardVelocity || Math.abs(current.vx) > maxHorizontalVelocity) {
-    triggerAntiCheat("impossible velocity");
-    return false;
-  }
-
-  if (current.width > game.player.maxSize || current.height > game.player.maxSize || current.width < 42 || current.height < 42) {
-    triggerAntiCheat("invalid player size");
-    return false;
-  }
-
-  if (current.score > expectedScoreLimit) {
-    triggerAntiCheat("impossible score");
-    return false;
-  }
-
-  return true;
-}
-
-function isAllowedHorizontalWrap(previous, current) {
-  const width = game.width;
-
-  if (previous.x < 0 && current.x > width - 50) {
-    return Math.abs(current.x - (previous.x + width)) < ANTI_CHEAT_MAX_HORIZONTAL_STEP;
-  }
-
-  if (previous.x > width - 50 && current.x < 0) {
-    return Math.abs(current.x - (previous.x - width)) < ANTI_CHEAT_MAX_HORIZONTAL_STEP;
-  }
-
-  return false;
-}
-
-function triggerAntiCheat(reason) {
-  console.warn("Anti-cheat triggered:", reason);
-  window.location.href = CHEAT_REDIRECT_URL;
-}
-
-// ============================================
-// UI MANAGEMENT
-// ============================================
-
-function showScreen(screen) {
-  allScreens.forEach((s) => s.classList.add("hidden"));
-  screen.classList.remove("hidden");
-  screen.classList.add("active");
-}
-
-function updateHud() {
-  if (!game) {
-    return;
-  }
-
-  hudMode.textContent = game.modeLabel;
-  hudScore.textContent = game.score;
-  hudXp.textContent = game.xpRun;
-
-  if (game.timeLimit) {
-    hudTimerWrap.classList.remove("hidden");
-    const minutes = Math.floor(game.timeRemaining / 60);
-    const seconds = Math.floor(game.timeRemaining % 60);
-    hudTimer.textContent = `${minutes}:${seconds.toString().padStart(2, "0")}`;
-  } else {
-    hudTimerWrap.classList.add("hidden");
-  }
-
-  if (game.effects.message) {
-    hudPowerup.classList.remove("hidden");
-    hudPowerupMessage.textContent = game.effects.message;
-  } else {
-    hudPowerup.classList.add("hidden");
-  }
-}
-
-function updateCountdownOverlay() {
-  if (!game || !game.countdownActive) {
-    countdownOverlay.classList.add("hidden");
-    return;
-  }
-
-  countdownOverlay.classList.remove("hidden");
-  const count = Math.ceil(game.countdownTime);
-
-  if (count > 0) {
-    countdownText.textContent = count;
-  } else {
-    countdownText.textContent = "GO!";
-  }
-}
-
-function hideRunOverlays() {
-  countdownOverlay.classList.add("hidden");
-  pauseOverlay.classList.add("hidden");
-  gameOverOverlay.classList.add("hidden");
+function showControls() {
+  stopGameLoop();
+  updateSettingsControls();
+  showScreen(controlsScreen);
 }
 
 function updateMenuStats() {
+  const equipped = getCharacter(saveState.equippedCharacter);
+  const leaderboardName = getSavedLeaderboardName();
+
+  menuPlayerName.textContent = leaderboardName || "Player";
   menuXp.textContent = saveState.xp;
   menuBest.textContent = saveState.bestScore;
   menuTrialBest.textContent = saveState.timeTrialBestScore;
-  menuPlayerName.textContent = getSavedLeaderboardName() || "Player";
-  menuCharacterImage.src = getCharacter(saveState.equippedCharacter).asset;
-  menuCharacterImage.alt = getCharacter(saveState.equippedCharacter).name;
+  menuCharacterImage.src = equipped.asset;
+  menuCharacterImage.alt = equipped.name;
 }
-
-// ============================================
-// LEADERBOARD SYSTEM
-// ============================================
 
 function showLeaderboardToast() {
   leaderboardToast.classList.remove("hidden");
-  leaderboardType = "classic"; // Default to classic when opening
-  loadLeaderboard();
+  leaderboardType = "classic";
   updateLeaderboardTabDisplay();
+  loadLeaderboard();
 }
 
 function hideLeaderboardToast() {
   leaderboardToast.classList.add("hidden");
+}
+
+async function loadCensoredWords(force = false) {
+  if (!leaderboardClient) {
+    return censorshipRules;
+  }
+
+  if (censorshipLoaded && !force) {
+    return censorshipRules;
+  }
+
+  if (censorshipLoading && !force) {
+    return censorshipLoading;
+  }
+
+  censorshipLoading = leaderboardClient
+    .from(CENSOR_TABLE)
+    .select("word, replacement")
+    .then(({ data, error }) => {
+      if (!error && Array.isArray(data) && data.length) {
+        censorshipRules = normalizeCensorRules(data);
+        censorshipLoaded = true;
+        const censoredName = sanitizeAndCensorLeaderboardName(saveState.playerName);
+
+        if (saveState.playerName !== censoredName) {
+          saveState.playerName = censoredName;
+          saveData();
+        }
+
+        updateMenuStats();
+      }
+
+      return censorshipRules;
+    })
+    .finally(() => {
+      censorshipLoading = null;
+    });
+
+  return censorshipLoading;
 }
 
 async function loadLeaderboard() {
@@ -1219,6 +1851,12 @@ function renderLeaderboardError(message) {
 }
 
 function prepareLeaderboardSubmit() {
+  if (game && game.adminAffected) {
+    leaderboardSubmitCard.classList.add("hidden");
+    leaderboardSubmitMessage.textContent = "This run is not leaderboard eligible.";
+    return;
+  }
+
   if (game && game.onlineDuel) {
     leaderboardSubmitCard.classList.add("hidden");
     leaderboardSubmitMessage.textContent = "Online duel scores stay out of the global leaderboard.";
@@ -1262,6 +1900,11 @@ async function submitLeaderboardScore(nameOverride = leaderboardNameInput.value,
     return;
   }
 
+  if (game.adminAffected) {
+    setLeaderboardSubmitMessage("This run is not leaderboard eligible.", "error");
+    return;
+  }
+
   await loadCensoredWords();
 
   const previousLockedName = getLockedLeaderboardName();
@@ -1270,653 +1913,442 @@ async function submitLeaderboardScore(nameOverride = leaderboardNameInput.value,
 
   if (nameError) {
     setLeaderboardSubmitMessage(nameError, "error");
+    if (!isAutoSubmit) {
+      leaderboardNameInput.focus();
+    }
     return;
   }
 
-  leaderboardLoading = true;
-  setLeaderboardSubmitMessage("Saving score...", "");
+  saveState.playerName = playerName;
+  saveState.leaderboardNameLocked = true;
+  saveData();
+  const scoreSnapshot = createLeaderboardScoreSnapshot(playerName);
+  submitScoreButton.disabled = true;
+  leaderboardNameInput.disabled = true;
+  submitScoreButton.textContent = "Auto";
+  setLeaderboardSubmitMessage(isAutoSubmit ? "Auto-saving score..." : "Saving score...", "");
 
-  const { data, error } = await leaderboardClient
-    .from(LEADERBOARD_TABLE)
-    .upsert({
-      user_id: authState.user.id,
-      player_name: playerName,
-      score: game.score,
-      mode_id: game.mode,
-      mode_label: game.modeLabel,
-      character_id: saveState.equippedCharacter,
-      xp_earned: game.finalXpEarned
-    }, {
-      onConflict: "user_id"
-    })
-    .select("id")
-    .single();
+  const saveResult = await saveLeaderboardScore(scoreSnapshot, true, previousLockedName);
 
-  leaderboardLoading = false;
+  if (saveResult.error) {
+    console.warn("Leaderboard save failed; queued for retry.", saveResult.error);
 
-  if (error) {
-    setLeaderboardSubmitMessage("Failed to save score.", "error");
+    if (saveResult.taken) {
+      submitScoreButton.disabled = false;
+      leaderboardNameInput.disabled = Boolean(getLockedLeaderboardName());
+      setLeaderboardSubmitMessage("That name is already taken.", "error");
+      return;
+    }
+
+    queuePendingLeaderboardScore(scoreSnapshot);
+    submitScoreButton.disabled = true;
+    leaderboardNameInput.disabled = true;
+    setLeaderboardSubmitMessage(`Score queued. ${getLeaderboardSaveErrorMessage(saveResult.error)}`, "error");
     return;
   }
 
   game.leaderboardSubmitted = true;
-  saveState.leaderboardRowId = data.id;
-  saveState.playerName = playerName;
-  saveState.leaderboardNameLocked = true;
-  saveData();
+  clearPendingLeaderboardScore(scoreSnapshot);
+  setLeaderboardSubmitMessage(saveResult.kept ? "Best score kept!" : "Score saved!", "success");
+  loadLeaderboard();
+}
 
-  setLeaderboardSubmitMessage("Score saved!", "success");
-  updateMenuStats();
+function createLeaderboardScoreSnapshot(playerName) {
+  return {
+    userId: authState.user ? authState.user.id : "",
+    playerName,
+    score: Math.max(0, Math.round(Number(game.score) || 0)),
+    mode: game.mode,
+    modeLabel: game.modeLabel,
+    characterId: saveState.equippedCharacter,
+    xpEarned: game.finalXpEarned || 0,
+    createdAt: Date.now()
+  };
+}
 
-  if (!isAutoSubmit) {
-    queueProfileSync();
+async function saveLeaderboardScore(scoreSnapshot, retryDuplicate = true, previousLockedName = "") {
+  const snapshot = normalizePendingLeaderboardScore(scoreSnapshot);
+
+  if (!snapshot) {
+    return { error: new Error("Invalid score."), kept: false };
   }
+
+  if (!authState.user || (snapshot.userId && snapshot.userId !== authState.user.id)) {
+    return { error: new Error("Wrong signed-in account."), kept: false };
+  }
+
+  const rpcResult = await saveLeaderboardScoreWithRpc(snapshot);
+
+  if (!rpcResult.unsupported) {
+    return rpcResult;
+  }
+
+  const row = {
+    user_id: authState.user.id,
+    player_name: snapshot.playerName,
+    score: snapshot.score,
+    mode_id: snapshot.mode,
+    mode_label: snapshot.modeLabel,
+    character_id: snapshot.characterId,
+    xp_earned: snapshot.xpEarned
+  };
+
+  if (authState.user) {
+    const { data: ownedRows, error: ownedSelectError } = await leaderboardClient
+      .from(LEADERBOARD_TABLE)
+      .select("id, score")
+      .eq("user_id", authState.user.id)
+      .limit(1);
+
+    if (ownedSelectError) {
+      return { error: ownedSelectError, kept: false };
+    }
+
+    const ownedRow = ownedRows && ownedRows[0];
+
+    if (ownedRow) {
+      saveState.leaderboardRowId = ownedRow.id;
+      saveData();
+
+      if (snapshot.score <= ownedRow.score) {
+        await updateProfileLeaderboardRow(ownedRow.id);
+        return { error: null, kept: true };
+      }
+
+      const updateRow = { ...row };
+      delete updateRow.user_id;
+
+      const { error: updateError } = await leaderboardClient
+        .from(LEADERBOARD_TABLE)
+        .update(updateRow)
+        .eq("id", ownedRow.id)
+        .select("id")
+        .single();
+
+      if (!updateError) {
+        await updateProfileLeaderboardRow(ownedRow.id);
+      }
+
+      return { error: updateError, kept: false, taken: updateError && updateError.code === "23505" };
+    }
+  }
+
+  const playerNameKey = getLeaderboardNameKey(snapshot.playerName);
+  const { data: existingRows, error: selectError } = await leaderboardClient
+    .from(LEADERBOARD_TABLE)
+    .select("id, score")
+    .eq("player_name_key", playerNameKey)
+    .limit(1);
+
+  if (selectError) {
+    return { error: selectError, kept: false };
+  }
+
+  const existing = existingRows && existingRows[0];
+
+  if (existing) {
+    const ownsExisting = saveState.leaderboardRowId === existing.id
+      || (previousLockedName && getLeaderboardNameKey(previousLockedName) === playerNameKey);
+
+    if (!ownsExisting) {
+      return { error: new Error("Name is taken."), kept: false, taken: true };
+    }
+
+    saveState.leaderboardRowId = existing.id;
+    saveData();
+
+    if (snapshot.score <= existing.score) {
+      return { error: null, kept: true };
+    }
+
+    const { error: updateError } = await leaderboardClient
+      .from(LEADERBOARD_TABLE)
+      .update({
+        score: row.score,
+        mode_id: row.mode_id,
+        mode_label: row.mode_label,
+        character_id: row.character_id,
+        xp_earned: row.xp_earned
+      })
+      .eq("id", existing.id)
+      .select("id")
+      .single();
+
+    return { error: updateError, kept: false, taken: false };
+  }
+
+  const { data: insertedRows, error: insertError } = await leaderboardClient
+    .from(LEADERBOARD_TABLE)
+    .insert(row)
+    .select("id");
+
+  if (insertError && insertError.code === "23505" && retryDuplicate) {
+    return saveLeaderboardScore(snapshot, false, previousLockedName);
+  }
+
+  if (!insertError && insertedRows && insertedRows[0]) {
+    saveState.leaderboardRowId = insertedRows[0].id;
+    saveData();
+    await updateProfileLeaderboardRow(insertedRows[0].id);
+  }
+
+  return { error: insertError, kept: false, taken: insertError && insertError.code === "23505" };
+}
+
+async function saveLeaderboardScoreWithRpc(snapshot) {
+  if (!leaderboardClient || !authState.user) {
+    return { unsupported: true };
+  }
+
+  const { data, error } = await leaderboardClient.rpc("save_leaderboard_score", {
+    p_player_name: snapshot.playerName,
+    p_score: snapshot.score,
+    p_mode_id: snapshot.mode,
+    p_mode_label: snapshot.modeLabel,
+    p_character_id: snapshot.characterId,
+    p_xp_earned: snapshot.xpEarned
+  });
+
+  if (error) {
+    const message = String(error.message || "");
+    const unsupported = error.code === "42883"
+      || message.toLowerCase().includes("function public.save_leaderboard_score")
+      || message.toLowerCase().includes("could not find the function");
+
+    if (unsupported) {
+      return { unsupported: true };
+    }
+
+    return {
+      error,
+      kept: false,
+      taken: error.code === "23505" || message.toLowerCase().includes("name is taken")
+    };
+  }
+
+  if (data && data.id) {
+    saveState.leaderboardRowId = data.id;
+    saveData();
+    await updateProfileLeaderboardRow(data.id);
+  }
+
+  return { error: null, kept: Boolean(data && data.kept), taken: false };
+}
+
+function getLeaderboardSaveErrorMessage(error) {
+  if (!error) {
+    return "We'll retry automatically.";
+  }
+
+  const message = String(error.message || error.details || "");
+
+  if (error.code === "42501" || message.toLowerCase().includes("permission denied")) {
+    return "Database permissions need the latest leaderboard SQL.";
+  }
+
+  if (error.code === "42883" || message.toLowerCase().includes("could not find the function")) {
+    return "Database needs the latest leaderboard SQL.";
+  }
+
+  if (!navigator.onLine || message.toLowerCase().includes("failed to fetch")) {
+    return "We'll retry when your connection is back.";
+  }
+
+  return "We'll retry automatically.";
+}
+
+function queuePendingLeaderboardScore(scoreSnapshot) {
+  const snapshot = normalizePendingLeaderboardScore(scoreSnapshot);
+
+  if (!snapshot) {
+    return;
+  }
+
+  const existing = normalizePendingLeaderboardScore(saveState.pendingLeaderboardScore);
+
+  if (!existing || snapshot.score >= existing.score) {
+    saveState.pendingLeaderboardScore = snapshot;
+    saveData();
+  }
+
+  schedulePendingLeaderboardRetry();
+}
+
+function clearPendingLeaderboardScore(scoreSnapshot = null) {
+  const pending = normalizePendingLeaderboardScore(saveState.pendingLeaderboardScore);
+
+  if (!pending) {
+    saveState.pendingLeaderboardScore = null;
+    saveData();
+    return;
+  }
+
+  const snapshot = normalizePendingLeaderboardScore(scoreSnapshot);
+
+  if (!snapshot || snapshot.score >= pending.score) {
+    saveState.pendingLeaderboardScore = null;
+    saveData();
+  }
+}
+
+function schedulePendingLeaderboardRetry(delay = LEADERBOARD_RETRY_DELAY) {
+  if (leaderboardRetryTimer || !saveState.pendingLeaderboardScore) {
+    return;
+  }
+
+  leaderboardRetryTimer = window.setTimeout(() => {
+    leaderboardRetryTimer = 0;
+    retryPendingLeaderboardScore();
+  }, delay);
+}
+
+async function retryPendingLeaderboardScore() {
+  const pending = normalizePendingLeaderboardScore(saveState.pendingLeaderboardScore);
+
+  if (!pending || leaderboardRetryInFlight || !leaderboardClient || !isSignedIn() || isAccountBanned()) {
+    return;
+  }
+
+  if (pending.userId && pending.userId !== authState.user.id) {
+    return;
+  }
+
+  leaderboardRetryInFlight = true;
+  const saveResult = await saveLeaderboardScore(pending, true, pending.playerName);
+  leaderboardRetryInFlight = false;
+
+  if (saveResult.error) {
+    console.warn("Pending leaderboard retry failed.", saveResult.error);
+
+    if (saveResult.taken) {
+      saveState.pendingLeaderboardScore = null;
+      saveData();
+    } else {
+      schedulePendingLeaderboardRetry();
+    }
+    return;
+  }
+
+  clearPendingLeaderboardScore(pending);
+  loadLeaderboard();
+
+  if (game && !game.running && gameOverOverlay && !gameOverOverlay.classList.contains("hidden")) {
+    game.leaderboardSubmitted = true;
+    setLeaderboardSubmitMessage(saveResult.kept ? "Best score kept!" : "Score saved!", "success");
+  }
+}
+
+async function updateProfileLeaderboardRow(rowId) {
+  if (!rowId || !isSignedIn() || !leaderboardClient) {
+    return;
+  }
+
+  saveState.leaderboardRowId = rowId;
+  queueProfileSync();
+}
+
+function setLeaderboardSubmitMessage(message, type) {
+  leaderboardSubmitMessage.textContent = message;
+  leaderboardSubmitCard.classList.toggle("success", type === "success");
+  leaderboardSubmitCard.classList.toggle("error", type === "error");
 }
 
 function autoSubmitLeaderboardScore() {
-  if (game && game.score > 0 && isSignedIn() && getSavedLeaderboardName() && leaderboardClient && !game.leaderboardSubmitted) {
-    submitLeaderboardScore(undefined, true);
-  }
-}
+  const lockedName = getLockedLeaderboardName();
 
-function setLeaderboardSubmitMessage(message, type = "") {
-  leaderboardSubmitMessage.textContent = message;
-  leaderboardSubmitCard.classList.remove("success", "error");
-
-  if (type) {
-    leaderboardSubmitCard.classList.add(type);
-  }
-}
-
-// ============================================
-// AUTHENTICATION SYSTEM
-// ============================================
-
-function initAuth() {
-  leaderboardClient = createLeaderboardClient();
-
-  if (!leaderboardClient) {
+  if (!isSignedIn() || !lockedName || !game || game.onlineDuel || game.adminAffected || game.score <= 0 || game.leaderboardSubmitted) {
     return;
   }
 
-  leaderboardClient.auth.onAuthStateChange(async (event, session) => {
-    authState.session = session;
-    authState.user = session?.user || null;
-
-    if (event === "SIGNED_IN" && session) {
-      await loadProfile();
-      updateMenuStats();
-    } else if (event === "SIGNED_OUT") {
-      authState.profile = null;
-      authState.profileLoaded = false;
-      saveState.leaderboardRowId = "";
-      saveData();
-      updateMenuStats();
-    }
-
-    updateAuthUI();
-  });
-
-  // Try to restore session
-  leaderboardClient.auth.getSession().then(({ data: { session } }) => {
-    if (session) {
-      authState.session = session;
-      authState.user = session.user;
-      loadProfile();
-    }
-
-    updateAuthUI();
-  });
+  submitLeaderboardScore(lockedName, true);
 }
 
-async function loadProfile() {
-  if (!authState.user || authState.profileLoaded) {
-    return;
+function getLockedLeaderboardName() {
+  const playerName = sanitizeAndCensorLeaderboardName(saveState.playerName);
+
+  if (!saveState.leaderboardNameLocked || getLeaderboardNameError(playerName)) {
+    return "";
   }
 
-  authState.profileLoaded = true;
-
-  const { data, error } = await leaderboardClient
-    .from(PROFILE_TABLE)
-    .select("*")
-    .eq("user_id", authState.user.id)
-    .single();
-
-  if (error && error.code !== "PGRST116") {
-    console.error("Failed to load profile:", error);
-    return;
-  }
-
-  if (data) {
-    authState.profile = data;
-    applyRemoteProfile(data);
-  } else {
-    // Create profile
-    await saveProfileNow();
-  }
-}
-
-function applyRemoteProfile(profile) {
-  if (authState.applyingRemote) {
-    return;
-  }
-
-  authState.applyingRemote = true;
-
-  const remote = {
-    xp: Number(profile.xp) || 0,
-    bestScore: Number(profile.mode_bests?.classic) || 0,
-    timeTrialBestScore: Number(profile.mode_bests?.timeTrial) || 0,
-    modeBests: profile.mode_bests || {},
-    ownedCharacters: profile.owned_characters || ["regular"],
-    equippedCharacter: profile.equipped_character || "regular",
-    redeemedCodes: profile.redeemed_codes || [],
-    playerName: profile.display_name || "",
-    leaderboardRowId: profile.leaderboard_row_id || "",
-    wins: Number(profile.wins) || 0,
-    losses: Number(profile.losses) || 0,
-    winStreak: Number(profile.win_streak) || 0
-  };
-
-  // Merge local and remote data
-  saveState.xp = Math.max(saveState.xp, remote.xp);
-  saveState.bestScore = Math.max(saveState.bestScore, remote.bestScore);
-  saveState.timeTrialBestScore = Math.max(saveState.timeTrialBestScore, remote.timeTrialBestScore);
-  saveState.modeBests = { ...saveState.modeBests, ...remote.modeBests };
-  saveState.ownedCharacters = [...new Set([...saveState.ownedCharacters, ...remote.ownedCharacters])];
-  saveState.equippedCharacter = saveState.equippedCharacter || remote.equippedCharacter;
-  saveState.redeemedCodes = [...new Set([...saveState.redeemedCodes, ...remote.redeemedCodes])];
-  saveState.playerName = saveState.playerName || remote.playerName;
-  saveState.leaderboardRowId = saveState.leaderboardRowId || remote.leaderboardRowId;
-  saveState.wins = Math.max(saveState.wins, remote.wins);
-  saveState.losses = Math.max(saveState.losses, remote.losses);
-  saveState.winStreak = Math.max(saveState.winStreak, remote.winStreak);
-
-  saveData();
-  authState.applyingRemote = false;
-}
-
-function createProfilePayload(includeUserId = false) {
-  const payload = {
-    display_name: getSavedLeaderboardName() || "",
-    xp: Math.max(0, Math.round(Number(saveState.xp) || 0)),
-    owned_characters: normalizeOwnedCharacters(saveState.ownedCharacters),
-    equipped_character: normalizeEquippedCharacter(saveState.equippedCharacter),
-    redeemed_codes: normalizeStringList(saveState.redeemedCodes),
-    mode_bests: normalizeModeBests(saveState.modeBests),
-    leaderboard_row_id: saveState.leaderboardRowId || null,
-    wins: Math.max(0, Math.round(Number(saveState.wins) || 0)),
-    losses: Math.max(0, Math.round(Number(saveState.losses) || 0)),
-    win_streak: Math.max(0, Math.round(Number(saveState.winStreak) || 0))
-  };
-
-  if (includeUserId && authState.user) {
-    payload.user_id = authState.user.id;
-  }
-
-  return payload;
-}
-
-function queueProfileSync() {
-  if (!canSyncProfile()) {
-    return;
-  }
-
-  clearTimeout(authState.syncTimer);
-  authState.syncTimer = window.setTimeout(saveProfileNow, PROFILE_SYNC_DELAY);
-}
-
-async function saveProfileNow() {
-  if (!canSyncProfile() || authState.syncInFlight) {
-    return;
-  }
-
-  authState.syncInFlight = true;
-  authState.pendingSync = false;
-
-  const payload = createProfilePayload(true);
-
-  const { error } = await leaderboardClient
-    .from(PROFILE_TABLE)
-    .upsert(payload, {
-      onConflict: "user_id"
-    });
-
-  authState.syncInFlight = false;
-
-  if (error) {
-    console.error("Failed to save profile:", error);
-    // Retry later
-    if (!authState.pendingSync) {
-      authState.pendingSync = true;
-      setTimeout(saveProfileNow, 5000);
-    }
-  }
-}
-
-function canSyncProfile() {
-  return Boolean(authState.user && leaderboardClient);
-}
-
-function isSignedIn() {
-  return Boolean(authState.user);
-}
-
-function isAccountBanned() {
-  return Boolean(authState.profile?.banned);
+  return playerName;
 }
 
 function getSavedLeaderboardName() {
-  if (saveState.leaderboardNameLocked && saveState.playerName) {
-    return saveState.playerName;
-  }
+  const playerName = sanitizeAndCensorLeaderboardName(saveState.playerName);
+  return getLeaderboardNameError(playerName) ? "" : playerName;
+}
 
-  if (authState.profile?.display_name) {
-    return authState.profile.display_name;
+function sanitizeLeaderboardName(name) {
+  return String(name || "")
+    .replace(/[^A-Za-z0-9 _.*-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 18);
+}
+
+function getLeaderboardNameKey(name) {
+  return sanitizeAndCensorLeaderboardName(name).toLowerCase();
+}
+
+function getLeaderboardNameError(name) {
+  if (!name) {
+    return "Use 1-18 letters or numbers.";
   }
 
   return "";
 }
 
-function getLockedLeaderboardName() {
-  return saveState.leaderboardNameLocked ? saveState.playerName : "";
+function censorLeaderboardName(name) {
+  return sanitizeAndCensorLeaderboardName(name);
 }
 
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
-
-function createLeaderboardClient() {
-  if (!window.BOUNCE_EJ_SUPABASE || !window.supabase || typeof window.supabase.createClient !== "function") {
-    return null;
-  }
-
-  return window.supabase.createClient(
-    window.BOUNCE_EJ_SUPABASE.url,
-    window.BOUNCE_EJ_SUPABASE.publishableKey
-  );
+function sanitizeAndCensorLeaderboardName(name) {
+  return sanitizeLeaderboardName(applyCensorship(sanitizeLeaderboardName(name)));
 }
 
-function collectPowerup(powerup) {
-  if (!powerup || !powerupDefinitions.length) {
-    return;
-  }
-
-  const definition = powerupDefinitions.find((def) => def.id === powerup.id);
-
-  if (!definition) {
-    return;
-  }
-
-  game.powerupsCollected += 1;
-
-  if (definition.effect === "grow") {
-    game.player.width = Math.min(game.player.maxSize, game.player.width + definition.sizeBonus);
-    game.player.height = Math.min(game.player.maxSize, game.player.height + definition.sizeBonus);
-  } else if (definition.effect === "doubleXp") {
-    game.effects.xpMultiplier = definition.xpMultiplier;
-    game.effects.xpMultiplierUntil = game.runTime + definition.duration;
-    game.effects.message = definition.message;
-    game.effects.messageUntil = game.runTime + definition.duration;
-  } else if (definition.effect === "boost") {
-    game.player.vy = Math.min(game.player.vy, definition.boostVelocity);
-  }
-
-  gainRunXp(5);
-  createPowerupParticles(powerup.x + powerup.width / 2, powerup.y);
+function applyCensorship(text) {
+  return censorshipRules.reduce((censored, rule) => {
+    const pattern = new RegExp(escapeRegExp(rule.word), "gi");
+    return censored.replace(pattern, rule.replacement);
+  }, String(text || ""));
 }
 
-function createLandingParticles(x, y) {
-  if (!saveState.settings.particles || !game.particles) {
-    return;
-  }
+function normalizeCensorRules(rows) {
+  const seen = new Set();
 
-  for (let i = 0; i < 8; i++) {
-    game.particles.push({
-      x,
-      y,
-      vx: (Math.random() - 0.5) * 200,
-      vy: (Math.random() - 0.5) * 200 - 100,
-      life: 0.5 + Math.random() * 0.5,
-      color: "#35c2ff"
-    });
-  }
-}
+  return rows
+    .map((row) => ({
+      word: sanitizeCensorWord(row.word),
+      replacement: typeof row.replacement === "string" && /^\*{1,12}$/.test(row.replacement) ? row.replacement : "****"
+    }))
+    .filter((rule) => {
+      const key = rule.word.toLowerCase();
 
-function createPowerupParticles(x, y) {
-  if (!saveState.settings.particles || !game.particles) {
-    return;
-  }
-
-  for (let i = 0; i < 12; i++) {
-    game.particles.push({
-      x,
-      y,
-      vx: (Math.random() - 0.5) * 300,
-      vy: (Math.random() - 0.5) * 300 - 150,
-      life: 0.8 + Math.random() * 0.4,
-      color: "#f5c542"
-    });
-  }
-}
-
-function gainRunXp(amount) {
-  game.xpRun += amount;
-}
-
-function seedPlatforms(width, height, mode, rng) {
-  const platforms = [];
-  const startY = height - 95 - 48;
-  let nextY = startY - 200;
-  let nextCenter = width / 2;
-
-  // Starting platform
-  platforms.push(createPlatform(width / 2 - 60, startY + 48, "normal", mode, width, rng));
-
-  // Generate platforms going up
-  while (nextY > -1000) {
-    const gapScale = mode.gapScale * Math.min(1.22, 1 + (Math.floor((startY - nextY) / 1000) * 0.1));
-    const type = randomPlatformType(rng);
-    const width = getPlatformWidth(type);
-    const x = pickPlatformX(nextCenter, width, game.width, rng);
-    nextCenter = x + width / 2;
-    platforms.push(createPlatform(x, nextY, type, mode, game.width, rng));
-    nextY -= (72 + rng() * 48) * gapScale;
-  }
-
-  return { platforms, nextY, nextCenter };
-}
-
-function randomPlatformType(rng) {
-  const random = rng();
-  const ramp = getModeRamp();
-
-  if (random < 0.02 * ramp) {
-    return "bouncePad";
-  }
-
-  if (random < 0.08 * ramp) {
-    return "moving";
-  }
-
-  return "normal";
-}
-
-function getPlatformWidth(type) {
-  switch (type) {
-    case "bouncePad":
-      return 80;
-    case "moving":
-      return 120;
-    default:
-      return 120;
-  }
-}
-
-function pickPlatformX(center, width, canvasWidth, rng) {
-  const minX = Math.max(0, center - 180 - width / 2);
-  const maxX = Math.min(canvasWidth - width, center + 180 - width / 2);
-  const range = maxX - minX;
-
-  if (range <= 0) {
-    return Math.max(0, Math.min(canvasWidth - width, center - width / 2));
-  }
-
-  return minX + rng() * range;
-}
-
-function createPlatform(x, y, type, mode, canvasWidth, rng) {
-  const platform = {
-    x,
-    y,
-    width: getPlatformWidth(type),
-    height: 24,
-    type,
-    touched: false,
-    coins: [],
-    powerup: null
-  };
-
-  // Add coins
-  if (type === "normal" && rng() < 0.3) {
-    const coinCount = Math.floor(rng() * 3) + 1;
-
-    for (let i = 0; i < coinCount; i++) {
-      platform.coins.push({
-        x: x + (i + 0.5) * (platform.width / coinCount),
-        y: y - 24
-      });
-    }
-  }
-
-  // Add powerup
-  if (type === "normal" && rng() < mode.powerupChance) {
-    const powerupIndex = Math.floor(rng() * powerupDefinitions.length);
-    const powerupDef = powerupDefinitions[powerupIndex];
-
-    if (powerupDef) {
-      platform.powerup = {
-        id: powerupDef.id,
-        x: x + platform.width / 2 - 16,
-        y: y - 32,
-        width: 32,
-        height: 32
-      };
-    }
-  }
-
-  // Moving platform properties
-  if (type === "moving") {
-    platform.moveMinX = Math.max(0, x - 60);
-    platform.moveMaxX = Math.min(canvasWidth - platform.width, x + 60);
-    platform.moveSpeed = 1 + rng() * 2;
-    platform.movePhase = rng() * Math.PI * 2;
-  }
-
-  return platform;
-}
-
-function loadCharacterImages() {
-  CHARACTERS.forEach((character) => {
-    const img = new Image();
-    img.src = character.asset;
-    characterImages[character.id] = img;
-  });
-}
-
-function loadBackgroundAdImages() {
-  BACKGROUND_AD_ASSETS.forEach((asset) => {
-    const img = new Image();
-    img.src = asset;
-    backgroundAdImages.push(img);
-  });
-}
-
-async function loadCensoredWords() {
-  if (censorshipLoaded) {
-    return;
-  }
-
-  if (censorshipLoading) {
-    await censorshipLoading;
-    return;
-  }
-
-  censorshipLoading = (async () => {
-    if (!leaderboardClient) {
-      censorshipLoaded = true;
-      return;
-    }
-
-    const { data, error } = await leaderboardClient
-      .from(CENSOR_TABLE)
-      .select("word, replacement");
-
-    if (error) {
-      console.error("Failed to load censorship rules:", error);
-      censorshipLoaded = true;
-      return;
-    }
-
-    censorshipRules = normalizeCensorRules(data || []);
-    censorshipLoaded = true;
-  })();
-
-  await censorshipLoading;
-}
-
-function updateBannedState() {
-  bannedScreen.classList.remove("hidden");
-}
-
-function resetInput() {
-  input.left = false;
-  input.right = false;
-  input.touchLeft = false;
-  input.touchRight = false;
-  input.swipeBoost = 0;
-  input.gamepadX = 0;
-}
-
-function setPaused(paused) {
-  if (!game || !game.running || game.onlineDuel) {
-    return;
-  }
-
-  game.paused = paused;
-
-  if (game.paused) {
-    pauseOverlay.classList.remove("hidden");
-  } else {
-    pauseOverlay.classList.add("hidden");
-  }
-}
-
-function drawGame() {
-  if (!game || !ctx) {
-    return;
-  }
-
-  const theme = THEMES[saveState.settings.theme] || THEMES.blue;
-
-  // Clear canvas
-  ctx.fillStyle = theme.canvasBg;
-  ctx.fillRect(0, 0, game.width, game.height);
-
-  // Background image
-  if (customBackgroundReady && customBackgroundImage.complete) {
-    ctx.globalAlpha = 0.3;
-    const imgAspect = customBackgroundImage.width / customBackgroundImage.height;
-    const canvasAspect = game.width / game.height;
-    let drawWidth, drawHeight, drawX, drawY;
-
-    if (imgAspect > canvasAspect) {
-      drawWidth = game.height * imgAspect;
-      drawHeight = game.height;
-      drawX = (game.width - drawWidth) / 2;
-      drawY = 0;
-    } else {
-      drawWidth = game.width;
-      drawHeight = game.width / imgAspect;
-      drawX = 0;
-      drawY = (game.height - drawHeight) / 2;
-    }
-
-    ctx.drawImage(customBackgroundImage, drawX, drawY, drawWidth, drawHeight);
-    ctx.globalAlpha = 1;
-  }
-
-  // Background rays
-  ctx.strokeStyle = theme.canvasRayLight;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, game.height);
-  ctx.lineTo(game.width, 0);
-  ctx.stroke();
-
-  ctx.strokeStyle = theme.canvasRayDark;
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(game.width, game.height);
-  ctx.stroke();
-
-  // Background ads
-  game.backgroundAds.forEach((ad) => {
-    if (ad.image && ad.image.complete) {
-      ctx.drawImage(ad.image, ad.x, ad.y, ad.width, ad.height);
-    }
-  });
-
-  ctx.save();
-  ctx.translate(0, -game.cameraY);
-
-  // Platforms
-  ctx.fillStyle = "#ffffff";
-  game.platforms.forEach((platform) => {
-    if (platform.y - game.cameraY > game.height + 100) {
-      return;
-    }
-
-    ctx.fillRect(platform.x, platform.y, platform.width, platform.height);
-
-    // Coins
-    platform.coins.forEach((coin) => {
-      ctx.fillStyle = "#f5c542";
-      ctx.beginPath();
-      ctx.arc(coin.x, coin.y, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#ffffff";
-    });
-
-    // Powerup
-    if (platform.powerup) {
-      const powerupDef = powerupById[platform.powerup.id];
-      ctx.fillStyle = "#f5c542";
-      ctx.fillRect(platform.powerup.x, platform.powerup.y, platform.powerup.width, platform.powerup.height);
-
-      if (powerupDef?.emoji) {
-        ctx.font = "20px Arial";
-        ctx.textAlign = "center";
-        ctx.fillStyle = "#000000";
-        ctx.fillText(powerupDef.emoji, platform.powerup.x + platform.powerup.width / 2, platform.powerup.y + platform.powerup.height / 2 + 7);
+      if (!rule.word || seen.has(key)) {
+        return false;
       }
-    }
-  });
 
-  // Particles
-  game.particles.forEach((particle) => {
-    ctx.fillStyle = particle.color;
-    ctx.globalAlpha = particle.life;
-    ctx.fillRect(particle.x - 2, particle.y - 2, 4, 4);
-  });
-  ctx.globalAlpha = 1;
+      seen.add(key);
+      return true;
+    })
+    .sort((first, second) => second.word.length - first.word.length);
+}
 
-  // Player
-  const character = getCharacter(saveState.equippedCharacter);
-  const playerImg = characterImages[character.id];
+function sanitizeCensorWord(word) {
+  return String(word || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 40);
+}
 
-  if (playerImg && playerImg.complete) {
-    ctx.drawImage(playerImg, game.player.x, game.player.y, game.player.width, game.player.height);
-  } else {
-    // Fallback to colored rectangle
-    ctx.fillStyle = character.fill;
-    ctx.fillRect(game.player.x, game.player.y, game.player.width, game.player.height);
-    ctx.strokeStyle = character.ring;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(game.player.x, game.player.y, game.player.width, game.player.height);
-  }
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  ctx.restore();
+function createSeededRandom(seed) {
+  let state = hashSeed(seed);
 
-  // Platform line
-  ctx.strokeStyle = theme.canvasLine;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(0, game.height - 95);
-  ctx.lineTo(game.width, game.height - 95);
-  ctx.stroke();
-
-  updateHud();
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
 }
 
 function hashSeed(seed) {
@@ -1930,580 +2362,6 @@ function hashSeed(seed) {
 
   return hash >>> 0 || 1;
 }
-
-function normalizeCharacters(characters) {
-  return characters.map((character) => ({
-    ...character,
-    asset: `${CHARACTER_ASSET_BASE_PATH}${character.file}`
-  }));
-}
-
-function normalizePowerups(powerups) {
-  return powerups.map((powerup) => ({
-    ...powerup,
-    emoji: powerup.emoji || "❓"
-  }));
-}
-
-function getCharacter(id) {
-  return CHARACTERS.find((character) => character.id === id) || CHARACTERS[0];
-}
-
-function getModeRamp() {
-  if (!game) {
-    return 1;
-  }
-
-  const height = game.startY - game.highestPoint;
-  const ramp = 1 + Math.floor(height / 1000) * 0.1;
-  return Math.min(ramp, 2);
-}
-
-function getModeBest(mode) {
-  return saveState.modeBests[mode] || 0;
-}
-
-function getJumpVelocityForRamp(ramp, mode) {
-  return -Math.sqrt(2 * 1800 * 120 * ramp * mode.jumpScale);
-}
-
-function getBouncePadVelocityForRamp(ramp, mode) {
-  return -Math.sqrt(2 * 1800 * 140 * ramp * mode.jumpScale);
-}
-
-function getControlSensitivity() {
-  return saveState.settings.sensitivity || 1;
-}
-
-function normalizeSettings(settings) {
-  return {
-    theme: THEMES[settings?.theme] ? settings.theme : "blue",
-    particles: Boolean(settings?.particles ?? true),
-    showGamepadStatus: Boolean(settings?.showGamepadStatus ?? true),
-    sensitivity: Math.max(0.5, Math.min(2, Number(settings?.sensitivity) || 1)),
-    backgroundImage: typeof settings?.backgroundImage === "string" ? settings.backgroundImage : "",
-    backgroundName: typeof settings?.backgroundName === "string" ? settings.backgroundName : ""
-  };
-}
-
-function normalizeOwnedCharacters(characters) {
-  return characters.filter((id) => CHARACTERS.some((character) => character.id === id));
-}
-
-function normalizeEquippedCharacter(character) {
-  return CHARACTERS.some((c) => c.id === character) ? character : "regular";
-}
-
-function normalizeStringList(list) {
-  return list.filter((item) => typeof item === "string" && item.length > 0);
-}
-
-function normalizeModeBests(bests) {
-  const normalized = {};
-
-  for (const mode in bests) {
-    const value = Number(bests[mode]);
-    if (Number.isFinite(value) && value >= 0) {
-      normalized[mode] = value;
-    }
-  }
-
-  return normalized;
-}
-
-function normalizeCensorRules(rules) {
-  return rules.map((rule) => ({
-    word: String(rule.word || "").toLowerCase(),
-    replacement: String(rule.replacement || "****")
-  }));
-}
-
-function censorLeaderboardName(name) {
-  if (!name || !censorshipRules.length) {
-    return name;
-  }
-
-  let censored = String(name).toLowerCase();
-
-  for (const rule of censorshipRules) {
-    const regex = new RegExp(`\\b${rule.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
-    censored = censored.replace(regex, rule.replacement);
-  }
-
-  return censored;
-}
-
-function sanitizeLeaderboardName(name) {
-  return String(name || "").replace(/[^\w\s\-_]/g, "").slice(0, 18).trim();
-}
-
-function sanitizeAndCensorLeaderboardName(name) {
-  return censorLeaderboardName(sanitizeLeaderboardName(name));
-}
-
-function getLeaderboardNameError(name) {
-  if (!name || name.length < 1) {
-    return "Name is required.";
-  }
-
-  if (name.length > 18) {
-    return "Name is too long.";
-  }
-
-  if (!/^[A-Za-z0-9\s\-_]+$/.test(name)) {
-    return "Name contains invalid characters.";
-  }
-
-  return null;
-}
-
-// ============================================
-// EVENT LISTENERS
-// ============================================
-
-function initEventListeners() {
-  // Menu buttons
-  playButton.addEventListener("click", () => startGame());
-  gameModesButton.addEventListener("click", () => showScreen(modesScreen));
-  multiplayerButton.addEventListener("click", showMultiplayer);
-  storeButton.addEventListener("click", () => showScreen(storeScreen));
-  characterButton.addEventListener("click", () => showScreen(characterScreen));
-  controlsButton.addEventListener("click", () => showScreen(controlsScreen));
-
-  // Navigation
-  modeBackButton.addEventListener("click", () => showScreen(menuScreen));
-  storeBackButton.addEventListener("click", () => showScreen(menuScreen));
-  characterBackButton.addEventListener("click", () => showScreen(menuScreen));
-  controlsBackButton.addEventListener("click", () => showScreen(menuScreen));
-  multiplayerBackButton.addEventListener("click", showMenu);
-
-  // Game controls
-  restartButton.addEventListener("click", () => {
-    if (game && game.onlineDuel) {
-      resetMultiplayerLobby();
-    } else {
-      startGame(game?.mode || "classic");
-    }
-  });
-  mainMenuButton.addEventListener("click", showMenu);
-  pauseResumeButton.addEventListener("click", () => setPaused(false));
-  pauseEndButton.addEventListener("click", () => endGame("paused"));
-
-  // Settings
-  particlesToggle.addEventListener("change", (event) => {
-    saveState.settings.particles = event.target.checked;
-    saveData();
-  });
-  gamepadBadgeToggle.addEventListener("change", (event) => {
-    saveState.settings.showGamepadStatus = event.target.checked;
-    saveData();
-  });
-  sensitivitySlider.addEventListener("input", (event) => {
-    const value = Number(event.target.value) / 100;
-    saveState.settings.sensitivity = value;
-    sensitivityValue.textContent = `${value * 100}%`;
-    saveData();
-  });
-
-  // Leaderboard
-  leaderboardButton.addEventListener("click", showLeaderboardToast);
-  leaderboardRefreshButton.addEventListener("click", () => {
-    leaderboardType = leaderboardType === "classic" ? "multiplayer" : "classic";
-    if (leaderboardType === "classic") {
-      loadLeaderboard();
-    } else {
-      loadMultiplayerLeaderboard();
-    }
-    updateLeaderboardTabDisplay();
-  });
-  leaderboardCloseButton.addEventListener("click", hideLeaderboardToast);
-  leaderboardToast.addEventListener("click", (event) => {
-    if (event.target === leaderboardToast) {
-      hideLeaderboardToast();
-    }
-  });
-  leaderboardNameInput.addEventListener("input", () => {
-    const cleaned = sanitizeLeaderboardName(leaderboardNameInput.value);
-
-    if (leaderboardNameInput.value !== cleaned) {
-      leaderboardNameInput.value = cleaned;
-    }
-  });
-  leaderboardNameInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      submitLeaderboardScore();
-    }
-  });
-
-  // Auth
-  authOpenButton.addEventListener("click", () => authOverlay.classList.remove("hidden"));
-  authCloseButton.addEventListener("click", () => authOverlay.classList.add("hidden"));
-  authOverlay.addEventListener("click", (event) => {
-    if (event.target === authOverlay) {
-      authOverlay.classList.add("hidden");
-    }
-  });
-  authSignInButton.addEventListener("click", signIn);
-  authSignUpButton.addEventListener("click", signUp);
-  authSignOutButton.addEventListener("click", signOut);
-  authNameInput.addEventListener("input", () => {
-    const cleaned = sanitizeLeaderboardName(authNameInput.value);
-
-    if (authNameInput.value !== cleaned) {
-      authNameInput.value = cleaned;
-    }
-  });
-
-  // Settings leaderboard name
-  settingsLeaderboardNameButton.addEventListener("click", updateLeaderboardName);
-  settingsLeaderboardNameInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      updateLeaderboardName();
-    }
-  });
-
-  // Background upload
-  backgroundUploadInput.addEventListener("change", handleBackgroundUpload);
-  clearBackgroundButton.addEventListener("click", clearBackground);
-
-  // Input handling
-  document.addEventListener("keydown", handleKeyDown);
-  document.addEventListener("keyup", handleKeyUp);
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-
-  // Gamepad
-  window.addEventListener("gamepadconnected", handleGamepadConnected);
-  window.addEventListener("gamepaddisconnected", handleGamepadDisconnected);
-
-  // Resize
-  window.addEventListener("resize", resizeCanvas);
-}
-
-function showMenu() {
-  showScreen(menuScreen);
-  updateMenuStats();
-}
-
-function updateAuthUI() {
-  const signedIn = isSignedIn();
-  const banned = isAccountBanned();
-
-  if (banned) {
-    bannedScreen.classList.remove("hidden");
-    return;
-  }
-
-  bannedScreen.classList.add("hidden");
-
-  authStatus.textContent = signedIn ? `Playing as ${getSavedLeaderboardName() || "User"}` : "Playing as guest";
-  authOpenButton.textContent = signedIn ? "Account" : "Sign In";
-  authSignOutButton.style.display = signedIn ? "block" : "none";
-  authAccountSummary.textContent = signedIn
-    ? `Signed in as ${authState.user.email}. XP and progress are synced.`
-    : "Sign in to sync XP, skins, and leaderboard progress.";
-
-  if (signedIn && authState.profile) {
-    authAccountSummary.textContent += ` Wins: ${authState.profile.wins || 0}, Losses: ${authState.profile.losses || 0}`;
-  }
-}
-
-async function signIn() {
-  const email = authEmailInput.value.trim();
-  const password = authPasswordInput.value.trim();
-
-  if (!email || !password) {
-    setAuthMessage("Email and password required.", "error");
-    return;
-  }
-
-  setAuthMessage("Signing in...");
-
-  const { error } = await leaderboardClient.auth.signInWithPassword({
-    email,
-    password
-  });
-
-  if (error) {
-    setAuthMessage(error.message, "error");
-  } else {
-    authOverlay.classList.add("hidden");
-  }
-}
-
-async function signUp() {
-  const email = authEmailInput.value.trim();
-  const password = authPasswordInput.value.trim();
-  const name = authNameInput.value.trim();
-
-  if (!email || !password || !name) {
-    setAuthMessage("All fields required.", "error");
-    return;
-  }
-
-  setAuthMessage("Creating account...");
-
-  const { error } = await leaderboardClient.auth.signUp({
-    email,
-    password,
-    options: {
-      data: {
-        display_name: name
-      }
-    }
-  });
-
-  if (error) {
-    setAuthMessage(error.message, "error");
-  } else {
-    setAuthMessage("Check your email to confirm your account.", "success");
-  }
-}
-
-async function signOut() {
-  const { error } = await leaderboardClient.auth.signOut();
-
-  if (error) {
-    setAuthMessage(error.message, "error");
-  } else {
-    authOverlay.classList.add("hidden");
-  }
-}
-
-function setAuthMessage(message, type = "") {
-  authMessage.textContent = message;
-  authMessage.className = `auth-message ${type}`;
-}
-
-async function updateLeaderboardName() {
-  const name = sanitizeLeaderboardName(settingsLeaderboardNameInput.value);
-
-  if (!name) {
-    setSettingsLeaderboardNameMessage("Name is required.", "error");
-    return;
-  }
-
-  const error = getLeaderboardNameError(name);
-
-  if (error) {
-    setSettingsLeaderboardNameMessage(error, "error");
-    return;
-  }
-
-  saveState.playerName = name;
-  saveState.leaderboardNameLocked = true;
-  saveData();
-  queueProfileSync();
-
-  setSettingsLeaderboardNameMessage("Name updated.", "success");
-  updateMenuStats();
-}
-
-function setSettingsLeaderboardNameMessage(message, type = "") {
-  settingsLeaderboardNameMessage.textContent = message;
-  settingsLeaderboardNameMessage.className = `setting-help ${type}`;
-}
-
-function handleBackgroundUpload(event) {
-  const file = event.target.files[0];
-
-  if (!file) {
-    return;
-  }
-
-  if (!file.type.startsWith("image/")) {
-    setBackgroundStatus("Please select an image file.", "error");
-    return;
-  }
-
-  if (file.size > 1024 * 1024) {
-    setBackgroundStatus("Image is too large (max 1MB).", "error");
-    return;
-  }
-
-  const reader = new FileReader();
-
-  reader.onload = (e) => {
-    const img = new Image();
-
-    img.onload = () => {
-      if (img.width > CUSTOM_BACKGROUND_MAX_SIDE || img.height > CUSTOM_BACKGROUND_MAX_SIDE) {
-        setBackgroundStatus("Image is too large (max 1100x1100).", "error");
-        return;
-      }
-
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
-
-      const compressed = canvas.toDataURL("image/jpeg", CUSTOM_BACKGROUND_QUALITY);
-      saveState.settings.backgroundImage = compressed;
-      saveState.settings.backgroundName = file.name;
-      customBackgroundSrc = compressed;
-      customBackgroundImage.src = compressed;
-      customBackgroundReady = true;
-      saveData();
-      setBackgroundStatus("Background updated.", "success");
-      updateBackgroundPreview();
-    };
-
-    img.src = e.target.result;
-  };
-
-  reader.readAsDataURL(file);
-}
-
-function clearBackground() {
-  saveState.settings.backgroundImage = "";
-  saveState.settings.backgroundName = "";
-  customBackgroundSrc = "";
-  customBackgroundReady = false;
-  saveData();
-  setBackgroundStatus("Background cleared.", "success");
-  updateBackgroundPreview();
-}
-
-function setBackgroundStatus(message, type = "") {
-  backgroundStatus.textContent = message;
-  backgroundStatus.className = `setting-help ${type}`;
-}
-
-function updateBackgroundPreview() {
-  if (customBackgroundReady && customBackgroundImage.complete) {
-    backgroundPreview.style.backgroundImage = `url(${customBackgroundSrc})`;
-    backgroundPreview.textContent = "";
-  } else {
-    backgroundPreview.style.backgroundImage = "";
-    backgroundPreview.textContent = "No custom background";
-  }
-}
-
-function handleKeyDown(event) {
-  if (event.repeat) {
-    return;
-  }
-
-  switch (event.code) {
-    case "KeyA":
-    case "ArrowLeft":
-      input.left = true;
-      event.preventDefault();
-      break;
-    case "KeyD":
-    case "ArrowRight":
-      input.right = true;
-      event.preventDefault();
-      break;
-    case "KeyP":
-      if (game && game.running && !game.onlineDuel) {
-        togglePause();
-      }
-      event.preventDefault();
-      break;
-    case "Escape":
-      if (game && game.running && !game.onlineDuel) {
-        togglePause();
-      } else if (!game || !game.running) {
-        showMenu();
-      }
-      event.preventDefault();
-      break;
-  }
-}
-
-function handleKeyUp(event) {
-  switch (event.code) {
-    case "KeyA":
-    case "ArrowLeft":
-      input.left = false;
-      break;
-    case "KeyD":
-    case "ArrowRight":
-      input.right = false;
-      break;
-  }
-}
-
-function handleVisibilityChange() {
-  if (document.hidden && game && game.running && !game.onlineDuel) {
-    togglePause();
-  }
-}
-
-function handleGamepadConnected(event) {
-  console.log("Gamepad connected:", event.gamepad.id);
-  updateGamepadStatus();
-}
-
-function handleGamepadDisconnected(event) {
-  console.log("Gamepad disconnected:", event.gamepad.id);
-  updateGamepadStatus();
-}
-
-function updateGamepadStatus() {
-  const gamepads = navigator.getGamepads();
-  const hasGamepad = Array.from(gamepads).some((gamepad) => gamepad !== null);
-
-  gamepadStatus.classList.toggle("hidden", !saveState.settings.showGamepadStatus || !hasGamepad);
-}
-
-function resizeCanvas() {
-  if (!canvas) {
-    return;
-  }
-
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
-
-  if (ctx) {
-    ctx.scale(dpr, dpr);
-  }
-}
-
-// ============================================
-// INITIALIZATION
-// ============================================
-
-function createClientId() {
-  if (window.crypto && typeof window.crypto.randomUUID === "function") {
-    return window.crypto.randomUUID();
-  }
-
-  return `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function init() {
-  loadCharacterImages();
-  loadBackgroundAdImages();
-  loadData();
-  initAuth();
-  initEventListeners();
-  updateMenuStats();
-  updateAuthUI();
-  updateBackgroundPreview();
-  resizeCanvas();
-  showMenu();
-
-  // Hide lock icon if multiplayer is unlocked
-  if (!MULTIPLAYER_LOCKED) {
-    const lockIcon = multiplayerButton.querySelector('.lock-icon');
-    if (lockIcon) {
-      lockIcon.style.display = 'none';
-    }
-  }
-}
-
-
-// ============================================
-// MULTIPLAYER MODULE
-// ============================================
-// ============================================
-// MULTIPLAYER STATE MANAGEMENT
-// ============================================
 
 function createMultiplayerState() {
   return {
@@ -2524,7 +2382,6 @@ function createMultiplayerState() {
     matchStartedAt: 0,
     matchOpponentId: "",
     matchSeed: "",
-    selectedMode: "classic",
     deaths: {},
     result: null,
     resultTimer: null,
@@ -2532,35 +2389,120 @@ function createMultiplayerState() {
   };
 }
 
-function updateMultiplayerState(deltaSeconds) {
-  if (!game || !game.onlineDuel || !multiplayer.channel) {
+function createClientId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+
+  return `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function createRoomCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const values = new Uint32Array(MULTIPLAYER_ROOM_CODE_LENGTH);
+  let code = "";
+
+  if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+    window.crypto.getRandomValues(values);
+  }
+
+  for (let index = 0; index < MULTIPLAYER_ROOM_CODE_LENGTH; index += 1) {
+    const value = values[index] || Math.floor(Math.random() * alphabet.length);
+    code += alphabet[value % alphabet.length];
+  }
+
+  return code;
+}
+
+function sanitizeRoomCode(value) {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 6);
+}
+
+function showMultiplayerStatus(message, type = "") {
+  multiplayerStatus.textContent = message;
+  multiplayerStatus.classList.toggle("success", type === "success");
+  multiplayerStatus.classList.toggle("error", type === "error");
+}
+
+function renderMultiplayerScreen() {
+  const inRoom = Boolean(multiplayer.channel);
+
+  multiplayerSetup.classList.toggle("hidden", inRoom);
+  multiplayerLobby.classList.toggle("hidden", !inRoom);
+  multiplayerRoomCode.textContent = multiplayer.roomCode || "----";
+  multiplayerReadyButton.textContent = multiplayer.ready ? "Ready!" : "Ready";
+  multiplayerReadyButton.disabled = !multiplayer.subscribed || multiplayer.status === "starting" || multiplayer.status === "playing";
+
+  if (!inRoom) {
+    multiplayerPlayerList.innerHTML = "";
+    multiplayerLobbyCountdown.textContent = "Waiting for two ready players.";
     return;
   }
 
-  // Send player state to opponent
-  if (game.runTime - multiplayerLastStateSentAt >= MULTIPLAYER_STATE_INTERVAL) {
-    sendMultiplayerBroadcast("playerState", {
-      x: game.player.x,
-      y: game.player.y,
-      score: game.score,
-      cameraY: game.cameraY
-    });
-    multiplayerLastStateSentAt = game.runTime;
-  }
+  renderMultiplayerPlayers();
+  updateMultiplayerLobbyText();
+}
 
-  // Send presence updates
-  if (game.runTime - multiplayerLastPresenceSentAt >= MULTIPLAYER_PRESENCE_INTERVAL) {
-    trackMultiplayerPresence({
-      score: game.score,
-      cameraY: game.cameraY
-    });
-    multiplayerLastPresenceSentAt = game.runTime;
+function renderMultiplayerPlayers() {
+  multiplayerPlayerList.innerHTML = "";
+
+  for (let index = 0; index < MULTIPLAYER_MAX_PLAYERS; index += 1) {
+    const player = multiplayer.players[index];
+    const row = document.createElement("div");
+    const image = document.createElement("img");
+    const copy = document.createElement("div");
+    const name = document.createElement("strong");
+    const meta = document.createElement("span");
+    const state = document.createElement("span");
+    const character = getCharacter(player && player.characterId);
+
+    row.className = "multiplayer-player";
+    image.src = character.asset;
+    image.alt = character.name;
+    copy.className = "multiplayer-player-copy";
+    name.textContent = player ? player.name : "Waiting...";
+    meta.textContent = player ? `${player.role === "host" ? "Host" : "Guest"} - ${character.name}` : "Invite a friend";
+    state.className = `multiplayer-player-state ${player && player.ready ? "is-ready" : "is-waiting"}`;
+    state.textContent = player ? (player.ready ? "Ready" : "Waiting") : "Open";
+    copy.append(name, meta);
+    row.append(image, copy, state);
+    multiplayerPlayerList.appendChild(row);
   }
 }
 
-// ============================================
-// MULTIPLAYER ROOM MANAGEMENT
-// ============================================
+function updateMultiplayerLobbyText() {
+  if (multiplayer.status === "starting") {
+    multiplayerLobbyCountdown.textContent = "Starting duel...";
+    showMultiplayerStatus("Both players are ready. Launching match.", "success");
+    return;
+  }
+
+  if (multiplayer.status === "playing") {
+    multiplayerLobbyCountdown.textContent = "Match in progress.";
+    showMultiplayerStatus("Online duel is live.", "success");
+    return;
+  }
+
+  const playerCount = multiplayer.players.length;
+
+  if (playerCount < MULTIPLAYER_MAX_PLAYERS) {
+    multiplayerLobbyCountdown.textContent = "Waiting for one more player.";
+    showMultiplayerStatus("Share the room code with a friend.", "");
+    return;
+  }
+
+  if (multiplayer.players.every((player) => player.ready)) {
+    multiplayerLobbyCountdown.textContent = "Both players ready.";
+    showMultiplayerStatus("Starting as soon as the host syncs the seed.", "success");
+    return;
+  }
+
+  multiplayerLobbyCountdown.textContent = "Both players must press Ready.";
+  showMultiplayerStatus("Waiting on ready checks.", "");
+}
 
 function createMultiplayerRoom() {
   connectMultiplayerRoom(createRoomCode(), "host");
@@ -2584,91 +2526,97 @@ function connectMultiplayerRoom(roomCode, role) {
     return;
   }
 
-  if (multiplayer.channel) {
-    leaveMultiplayerRoom();
-  }
+  leaveMultiplayerRoom(false);
 
   multiplayer = createMultiplayerState();
-  multiplayer.roomCode = roomCode;
+  multiplayer.roomCode = sanitizeRoomCode(roomCode);
   multiplayer.role = role;
   multiplayer.isHost = role === "host";
-  multiplayer.status = "connecting";
+  multiplayer.status = "joining";
+  multiplayer.joinedAt = Date.now();
 
-  const channelName = `${MULTIPLAYER_CHANNEL_PREFIX}${roomCode}`;
-  multiplayer.channel = leaderboardClient.channel(channelName, {
+  const channel = leaderboardClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
-      presence: {
-        key: multiplayer.playerId
-      },
-      broadcast: {
-        self: true
-      }
+      broadcast: { self: true },
+      presence: { key: multiplayer.playerId }
     }
   });
 
-  multiplayer.channel
-    .on("presence", { event: "sync" }, () => syncMultiplayerPresence())
-    .on("presence", { event: "join" }, ({ key, newPresences }) => handleMultiplayerPresenceJoin({ key, newPresences }))
-    .on("presence", { event: "leave" }, ({ key, leftPresences }) => handleMultiplayerPresenceLeave({ leftPresences }))
-    .on("broadcast", { event: "room_seed" }, ({ payload }) => handleMultiplayerRoomSeed(payload))
-    .on("broadcast", { event: "ready_update" }, ({ payload }) => handleMultiplayerReadyUpdate(payload))
-    .on("broadcast", { event: "start_match" }, ({ payload }) => handleMultiplayerStartMatch(payload))
-    .on("broadcast", { event: "state_tick" }, ({ payload }) => handleMultiplayerStateTick(payload))
-    .on("broadcast", { event: "player_dead" }, ({ payload }) => handleMultiplayerPlayerDead(payload))
-    .on("broadcast", { event: "match_result" }, ({ payload }) => handleMultiplayerMatchResult(payload))
-    .on("broadcast", { event: "rematch_request" }, ({ payload }) => handleMultiplayerRematchRequest(payload))
-    .on("broadcast", { event: "leave_match" }, ({ payload }) => handleMultiplayerLeaveMatch(payload))
-    .subscribe(async (status) => {
-      if (status === "SUBSCRIBED") {
-        multiplayer.subscribed = true;
-        multiplayer.joinedAt = Date.now();
+  multiplayer.channel = channel;
+
+  channel
+    .on("presence", { event: "sync" }, syncMultiplayerPresence)
+    .on("presence", { event: "leave" }, handleMultiplayerPresenceLeave);
+
+  ["room_seed", "ready_update", "start_match", "state_tick", "player_dead", "match_result", "rematch_request", "leave_match"].forEach((eventName) => {
+    channel.on("broadcast", { event: eventName }, ({ payload }) => handleMultiplayerBroadcast(eventName, payload || {}));
+  });
+
+  channel.subscribe((status) => {
+    if (multiplayer.channel !== channel) {
+      return;
+    }
+
+    if (status === "SUBSCRIBED") {
+      multiplayer.subscribed = true;
+      // Only update status/UI if we're not mid-match — a reconnect during a
+      // game should restore subscribed=true without clobbering the playing state.
+      if (multiplayer.status !== "playing" && multiplayer.status !== "starting") {
         multiplayer.status = "lobby";
-        trackMultiplayerPresence();
+        showMultiplayerStatus(multiplayer.isHost ? "Room created. Share the code." : "Joined room.", "success");
         renderMultiplayerScreen();
-        showMultiplayerStatus("Connected to room.", "success");
-      } else if (status === "CHANNEL_ERROR") {
-        showMultiplayerStatus("Failed to connect to room.", "error");
-        leaveMultiplayerRoom();
-      } else if (status === "TIMED_OUT") {
-        showMultiplayerStatus("Connection timed out.", "error");
-        leaveMultiplayerRoom();
-      } else if (status === "CLOSED") {
-        leaveMultiplayerRoom();
       }
-    });
-}
+      trackMultiplayerPresence();
+      return;
+    }
 
-function leaveMultiplayerRoom(shouldBroadcast = true) {
-  if (!multiplayer.channel) {
-    return;
-  }
+    if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+      multiplayer.subscribed = false;
+      if (game && game.onlineDuel && multiplayer.status === "playing" && !multiplayer.result) {
+        // Do NOT immediately end the match on a transient channel error/reconnect.
+        // Supabase Realtime can briefly fire CLOSED during a reconnect cycle.
+        // Let checkMultiplayerDisconnect handle the timeout via MULTIPLAYER_DISCONNECT_LIMIT
+        // so the match survives brief connection hiccups.
+        return;
+      }
 
-  if (shouldBroadcast) {
-    sendMultiplayerBroadcast("leave_match", { playerId: multiplayer.playerId });
-  }
+      showMultiplayerStatus("Could not connect to the room.", "error");
+    }
+  });
 
-  multiplayer.channel.unsubscribe();
-  multiplayer.channel = null;
-  multiplayer = createMultiplayerState();
   renderMultiplayerScreen();
+  showMultiplayerStatus("Connecting to room...", "");
 }
 
-function createRoomCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let result = "";
-  for (let i = 0; i < MULTIPLAYER_ROOM_CODE_LENGTH; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+function leaveMultiplayerRoom(broadcast = true) {
+  const channel = multiplayer.channel;
+
+  if (channel && broadcast) {
+    sendMultiplayerBroadcast("leave_match", {
+      reason: game && game.onlineDuel && game.running ? "left" : "lobby"
+    });
   }
-  return result;
-}
 
-function sanitizeRoomCode(code) {
-  return code.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, MULTIPLAYER_ROOM_CODE_LENGTH);
-}
+  if (multiplayer.resultTimer) {
+    clearTimeout(multiplayer.resultTimer);
+  }
 
-// ============================================
-// MULTIPLAYER PRESENCE & SYNC
-// ============================================
+  if (channel && leaderboardClient) {
+    try {
+      channel.untrack();
+      leaderboardClient.removeChannel(channel);
+    } catch (error) {
+      // Realtime cleanup is best effort when leaving a room.
+    }
+  }
+
+  multiplayer = createMultiplayerState();
+
+  if (multiplayerScreen.classList.contains("active")) {
+    renderMultiplayerScreen();
+    showMultiplayerStatus("Create a room or join a friend.", "");
+  }
+}
 
 function trackMultiplayerPresence(patch = {}) {
   if (!multiplayer.channel || !multiplayer.subscribed) {
@@ -2707,10 +2655,7 @@ function getOwnMultiplayerPresence() {
     size: player ? player.width : 48,
     runTime: inOnlineGame ? game.runTime : 0,
     joinedAt: multiplayer.joinedAt,
-    updatedAt: Date.now(),
-    wins: saveState.wins || 0,
-    losses: saveState.losses || 0,
-    winStreak: saveState.winStreak || 0
+    updatedAt: Date.now()
   };
 }
 
@@ -2732,124 +2677,145 @@ function syncMultiplayerPresence() {
 
   const hadOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
   multiplayer.players = acceptedPlayers;
+  const hasOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
 
-  if (!hadOpponent && multiplayer.players.length === MULTIPLAYER_MAX_PLAYERS) {
-    multiplayer.opponentLeftAt = 0;
-  } else if (hadOpponent && !multiplayer.opponentLeftAt) {
-    multiplayer.opponentLeftAt = Date.now();
+  if (game && game.onlineDuel && multiplayer.status === "playing") {
+    const opponent = multiplayer.players.find((player) => player.playerId !== multiplayer.playerId);
+
+    if (opponent) {
+      multiplayer.matchHadOpponent = true;
+      multiplayer.matchOpponentId = opponent.playerId;
+      multiplayer.opponentLeftAt = 0;
+      updateOpponentSnapshot(opponent);
+    } else if (hadOpponent && !multiplayer.opponentLeftAt) {
+      multiplayer.opponentLeftAt = Date.now();
+    }
   }
 
-  trackMultiplayerPresence();
   renderMultiplayerScreen();
+  maybeStartMultiplayerMatch();
 }
 
-function handleMultiplayerPresenceJoin({ key, newPresences }) {
-  syncMultiplayerPresence();
+function flattenMultiplayerPresence(state) {
+  const byId = new Map();
+
+  Object.values(state || {}).forEach((presences) => {
+    presences.forEach((presence) => {
+      if (!presence || presence.roomCode !== multiplayer.roomCode || !presence.playerId) {
+        return;
+      }
+
+      const existing = byId.get(presence.playerId);
+
+      if (!existing || Number(presence.updatedAt) >= Number(existing.updatedAt || 0)) {
+        byId.set(presence.playerId, normalizeMultiplayerPresence(presence));
+      }
+    });
+  });
+
+  return [...byId.values()].sort(compareMultiplayerPlayers);
+}
+
+function normalizeMultiplayerPresence(presence) {
+  return {
+    playerId: String(presence.playerId || ""),
+    name: sanitizeLeaderboardName(presence.name || "Player") || "Player",
+    characterId: getCharacter(presence.characterId).id,
+    role: presence.role === "host" ? "host" : "guest",
+    ready: Boolean(presence.ready),
+    alive: presence.alive !== false,
+    score: Number(presence.score) || 0,
+    status: typeof presence.status === "string" ? presence.status : "lobby",
+    xRatio: clampNumber(Number(presence.xRatio), 0, 1, 0.5),
+    yOffset: Number.isFinite(Number(presence.yOffset)) ? Number(presence.yOffset) : 0,
+    size: clampNumber(Number(presence.size), 30, 86, 48),
+    runTime: Number(presence.runTime) || 0,
+    joinedAt: Number(presence.joinedAt) || 0,
+    updatedAt: Number(presence.updatedAt) || 0
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, value));
+}
+
+function compareMultiplayerPlayers(first, second) {
+  if (first.role !== second.role) {
+    return first.role === "host" ? -1 : 1;
+  }
+
+  if (first.joinedAt !== second.joinedAt) {
+    return first.joinedAt - second.joinedAt;
+  }
+
+  return first.playerId.localeCompare(second.playerId);
+}
+
+function getAcceptedMultiplayerPlayers(players) {
+  const sorted = [...players].sort(compareMultiplayerPlayers);
+  const host = sorted.find((player) => player.role === "host");
+  const guests = sorted.filter((player) => player.playerId !== (host && host.playerId));
+
+  return (host ? [host, ...guests] : guests).slice(0, MULTIPLAYER_MAX_PLAYERS);
 }
 
 function handleMultiplayerPresenceLeave({ leftPresences }) {
+  if (!game || !game.onlineDuel || multiplayer.status !== "playing") {
+    return;
+  }
+
   const opponentLeft = (leftPresences || []).some((presence) => presence.playerId && presence.playerId !== multiplayer.playerId);
 
   if (opponentLeft && !multiplayer.opponentLeftAt) {
     multiplayer.opponentLeftAt = Date.now();
   }
-
-  syncMultiplayerPresence();
 }
 
-function flattenMultiplayerPresence(presenceState) {
-  const players = [];
-
-  for (const key in presenceState) {
-    const presences = presenceState[key] || [];
-    for (const presence of presences) {
-      players.push(presence);
-    }
-  }
-
-  return players;
-}
-
-function getAcceptedMultiplayerPlayers(allPlayers) {
-  const playersById = {};
-  const now = Date.now();
-
-  for (const player of allPlayers) {
-    if (!player.playerId || !player.roomCode || player.roomCode !== multiplayer.roomCode) {
-      continue;
-    }
-
-    const existing = playersById[player.playerId];
-
-    if (!existing || player.updatedAt > existing.updatedAt) {
-      playersById[player.playerId] = player;
-    }
-  }
-
-  return Object.values(playersById)
-    .filter((player) => now - player.updatedAt < MULTIPLAYER_PRESENCE_LEAVE_GRACE * 1000)
-    .sort((a, b) => a.joinedAt - b.joinedAt);
-}
-
-// ============================================
-// MULTIPLAYER BROADCAST HANDLERS
-// ============================================
-
-function handleMultiplayerRoomSeed(payload) {
-  if (!multiplayer.channel || multiplayer.status !== "starting") {
+function handleMultiplayerBroadcast(eventName, payload) {
+  if (!payload || payload.roomCode !== multiplayer.roomCode) {
     return;
   }
 
-  multiplayer.matchSeed = payload.seed;
-}
-
-function handleMultiplayerReadyUpdate(payload) {
-  if (!multiplayer.channel || payload.senderId === multiplayer.playerId) {
+  if (eventName === "room_seed") {
+    multiplayer.matchSeed = payload.seed || multiplayer.matchSeed;
     return;
   }
 
-  syncMultiplayerPresence();
-}
-
-function handleMultiplayerStartMatch(payload) {
-  if (!multiplayer.channel || payload.senderId !== multiplayer.matchOpponentId) {
+  if (eventName === "ready_update") {
+    syncMultiplayerPresence();
     return;
   }
 
-  startMultiplayerMatch(payload);
-}
-
-function handleMultiplayerStateTick(payload) {
-  if (!game || !game.onlineDuel || payload.playerId === multiplayer.playerId) {
+  if (eventName === "start_match") {
+    startMultiplayerMatch(payload);
     return;
   }
 
-  multiplayer.lastOpponentStateAt = Date.now();
-  multiplayer.opponent = payload;
-}
-
-function handleMultiplayerPlayerDead(payload) {
-  if (!game || !game.onlineDuel || payload.playerId === multiplayer.playerId) {
+  if (eventName === "state_tick") {
+    receiveMultiplayerStateTick(payload);
     return;
   }
 
-  recordMultiplayerDeath(payload);
-}
-
-function handleMultiplayerMatchResult(payload) {
-  if (!game || !game.onlineDuel || payload.senderId === multiplayer.playerId) {
+  if (eventName === "player_dead") {
+    recordMultiplayerDeath(payload);
     return;
   }
 
-  finishMultiplayerMatch(payload);
-}
+  if (eventName === "match_result") {
+    finishMultiplayerMatch(payload);
+    return;
+  }
 
-function handleMultiplayerRematchRequest(payload) {
-  resetMultiplayerLobby(false);
-  showMultiplayerStatus(`${sanitizeLeaderboardName(payload.name || "Opponent") || "Opponent"} wants a rematch.`, "");
-}
+  if (eventName === "rematch_request") {
+    resetMultiplayerLobby(false);
+    showMultiplayerStatus(`${sanitizeLeaderboardName(payload.name || "Opponent") || "Opponent"} wants a rematch.`, "");
+    return;
+  }
 
-function handleMultiplayerLeaveMatch(payload) {
   if (eventName === "leave_match" && payload.senderId !== multiplayer.playerId && game && game.onlineDuel && multiplayer.status === "playing") {
     finishMultiplayerMatch({
       winnerId: multiplayer.playerId,
@@ -2860,9 +2826,34 @@ function handleMultiplayerLeaveMatch(payload) {
   }
 }
 
-// ============================================
-// MULTIPLAYER GAME MANAGEMENT
-// ============================================
+function sendMultiplayerBroadcast(eventName, payload = {}) {
+  if (!multiplayer.channel || !multiplayer.subscribed) {
+    return Promise.resolve("offline");
+  }
+
+  return multiplayer.channel.send({
+    type: "broadcast",
+    event: eventName,
+    payload: {
+      ...payload,
+      roomCode: multiplayer.roomCode,
+      senderId: multiplayer.playerId,
+      sentAt: Date.now()
+    }
+  }).catch(() => "error");
+}
+
+function toggleMultiplayerReady() {
+  if (!multiplayer.channel || multiplayer.status === "starting" || multiplayer.status === "playing") {
+    return;
+  }
+
+  multiplayer.ready = !multiplayer.ready;
+  trackMultiplayerPresence();
+  sendMultiplayerBroadcast("ready_update", { ready: multiplayer.ready });
+  renderMultiplayerScreen();
+  maybeStartMultiplayerMatch();
+}
 
 function maybeStartMultiplayerMatch() {
   if (!multiplayer.isHost || multiplayer.startQueued || multiplayer.status !== "lobby") {
@@ -2881,7 +2872,7 @@ function maybeStartMultiplayerMatch() {
   sendMultiplayerBroadcast("room_seed", { seed });
   sendMultiplayerBroadcast("start_match", {
     seed,
-    mode: multiplayer.selectedMode || "classic",
+    mode: "classic",
     players: multiplayer.players.map((player) => ({
       playerId: player.playerId,
       name: player.name,
@@ -2910,8 +2901,7 @@ function startMultiplayerMatch(payload) {
   multiplayer.matchOpponentId = payloadOpponent ? String(payloadOpponent.playerId) : "";
   multiplayer.matchHadOpponent = Boolean(multiplayer.matchOpponentId) || multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
   clearMultiplayerResultTimer();
-  const gameMode = payload.mode || "classic";
-  startGame(gameMode, {
+  startGame("classic", {
     onlineDuel: true,
     seed: multiplayer.matchSeed,
     roomCode: multiplayer.roomCode
@@ -2919,21 +2909,80 @@ function startMultiplayerMatch(payload) {
   trackMultiplayerPresence();
 }
 
-function sendMultiplayerBroadcast(eventName, payload = {}) {
-  if (!multiplayer.channel || !multiplayer.subscribed) {
-    return Promise.resolve("offline");
+function updateMultiplayerDuringGame(options = {}) {
+  if (!game.onlineDuel || !multiplayer.channel || multiplayer.status !== "playing") {
+    return;
   }
 
-  return multiplayer.channel.send({
-    type: "broadcast",
-    event: eventName,
-    payload: { ...payload, senderId: multiplayer.playerId }
+  const now = Date.now();
+  const stateIntervalMs = MULTIPLAYER_STATE_INTERVAL * 1000;
+  const presenceIntervalMs = MULTIPLAYER_PRESENCE_INTERVAL * 1000;
+
+  if (!game.multiplayerLastStateSentAt || now - game.multiplayerLastStateSentAt >= stateIntervalMs) {
+    game.multiplayerLastStateSentAt = now;
+    sendMultiplayerStateTick();
+  }
+
+  if (!game.multiplayerLastPresenceSentAt || now - game.multiplayerLastPresenceSentAt >= presenceIntervalMs) {
+    game.multiplayerLastPresenceSentAt = now;
+    trackMultiplayerPresence();
+  }
+
+  if (options.checkDisconnect !== false) {
+    checkMultiplayerDisconnect();
+  }
+}
+
+function sendMultiplayerStateTick() {
+  if (!game || !game.onlineDuel || !game.running) {
+    return;
+  }
+
+  const player = game.player;
+
+  sendMultiplayerBroadcast("state_tick", {
+    playerId: multiplayer.playerId,
+    name: getSavedLeaderboardName() || "Player",
+    characterId: saveState.equippedCharacter,
+    xRatio: (player.x + player.width / 2) / game.width,
+    yOffset: player.y - game.startY,
+    size: player.width,
+    score: game.score,
+    alive: true,
+    runTime: game.runTime
   });
 }
 
-// ============================================
-// MULTIPLAYER DEATH & RESULT HANDLING
-// ============================================
+function receiveMultiplayerStateTick(payload) {
+  if (!game || !game.onlineDuel || payload.playerId === multiplayer.playerId) {
+    return;
+  }
+
+  updateOpponentSnapshot(payload);
+}
+
+function updateOpponentSnapshot(payload) {
+  if (!game || !game.onlineDuel || !payload || payload.playerId === multiplayer.playerId) {
+    return;
+  }
+
+  const now = Date.now();
+  multiplayer.opponentLeftAt = 0;
+  multiplayer.lastOpponentStateAt = now;
+  multiplayer.matchHadOpponent = true;
+  multiplayer.matchOpponentId = String(payload.playerId);
+  multiplayer.opponent = {
+    playerId: payload.playerId,
+    name: sanitizeLeaderboardName(payload.name || "Opponent") || "Opponent",
+    characterId: getCharacter(payload.characterId).id,
+    xRatio: clampNumber(Number(payload.xRatio), 0, 1, multiplayer.opponent ? multiplayer.opponent.xRatio : 0.5),
+    yOffset: Number.isFinite(Number(payload.yOffset)) ? Number(payload.yOffset) : (multiplayer.opponent ? multiplayer.opponent.yOffset : 0),
+    size: clampNumber(Number(payload.size), 30, 86, multiplayer.opponent ? multiplayer.opponent.size : 48),
+    score: Number(payload.score) || 0,
+    alive: payload.alive !== false,
+    updatedAt: now
+  };
+}
 
 function handleLocalMultiplayerDeath(reason) {
   if (game.multiplayerDeathSent) {
@@ -2961,123 +3010,27 @@ function handleLocalMultiplayerDeath(reason) {
   drawGame();
 }
 
-function recordMultiplayerDeath(death) {
-  multiplayer.deaths[death.playerId] = death;
-}
-
-function getMultiplayerScoreMap() {
-  const scores = {};
-
-  for (const playerId in multiplayer.deaths) {
-    scores[playerId] = multiplayer.deaths[playerId].score;
-  }
-
-  if (game && game.onlineDuel && game.running) {
-    scores[multiplayer.playerId] = game.score;
-  }
-
-  return scores;
-}
-
-function getOtherMultiplayerPlayerId(playerId) {
-  for (const player of multiplayer.players) {
-    if (player.playerId !== playerId) {
-      return player.playerId;
-    }
-  }
-
-  return null;
-}
-
-function finishMultiplayerMatch(result) {
-  if (!game || !game.onlineDuel || multiplayer.result) {
+function recordMultiplayerDeath(payload) {
+  if (!payload || !payload.playerId || multiplayer.result) {
     return;
   }
 
-  multiplayer.result = result;
-  multiplayer.status = "ended";
+  if (!multiplayer.deaths[payload.playerId]) {
+    multiplayer.deaths[payload.playerId] = {
+      playerId: payload.playerId,
+      name: sanitizeLeaderboardName(payload.name || "Player") || "Player",
+      score: Number(payload.score) || 0,
+      diedAt: Number(payload.diedAt) || Date.now(),
+      reason: payload.reason || "fell"
+    };
+  }
+
+  scheduleMultiplayerResultCheck();
+}
+
+function scheduleMultiplayerResultCheck() {
   clearMultiplayerResultTimer();
-
-  if (game.running) {
-    game.running = false;
-  }
-
-  // MULTIPLAYER TRACKING: Update wins/losses/streak
-  const isDraw = !result.winnerId;
-  const didWin = result.winnerId === multiplayer.playerId;
-  const didLose = result.loserId === multiplayer.playerId;
-
-  if (didWin) {
-    saveState.wins = (saveState.wins || 0) + 1;
-    saveState.winStreak = (saveState.winStreak || 0) + 1;
-  } else if (didLose) {
-    saveState.losses = (saveState.losses || 0) + 1;
-    saveState.winStreak = 0; // Reset streak on loss
-  } else {
-    // Draw - no change to wins/losses
-  }
-
-  // MULTIPLAYER XP BONUS: +50 for win, +10 for loss
-  let bonusXp = 0;
-  if (didWin) {
-    bonusXp = 50;
-  } else if (didLose) {
-    bonusXp = 10;
-  }
-
-  saveMultiplayerRunXp(bonusXp);
-  queueProfileSync();
-
-  pauseOverlay.classList.add("hidden");
-  countdownOverlay.classList.add("hidden");
-  restartButton.textContent = "Back To Lobby";
-  gameOverTitle.textContent = isDraw ? "Draw" : didWin ? "Victory" : didLose ? "Defeat" : "Match Over";
-  gameOverMessage.textContent = getMultiplayerResultMessage(result);
-
-  // MULTIPLAYER XP DISPLAY: Show bonus on game over screen
-  if (bonusXp > 0) {
-    gameOverMessage.textContent += ` +${bonusXp} XP bonus!`;
-  }
-
-  gameOverMessage.classList.remove("hidden");
-  finalScore.textContent = game.score;
-  finalBest.textContent = getModeBest("classic");
-  finalTotalXp.textContent = saveState.xp;
-  prepareLeaderboardSubmit();
-  gameOverOverlay.classList.remove("hidden");
-  trackMultiplayerPresence({ ready: false });
-}
-
-function finishMultiplayerDisconnect() {
-  if (!game || !game.onlineDuel || multiplayer.result) {
-    return;
-  }
-
-  const result = {
-    winnerId: multiplayer.playerId,
-    loserId: getOtherMultiplayerPlayerId(multiplayer.playerId),
-    reason: "disconnect",
-    scores: getMultiplayerScoreMap()
-  };
-
-  sendMultiplayerBroadcast("match_result", result);
-  finishMultiplayerMatch(result);
-}
-
-function getMultiplayerResultMessage(result) {
-  if (result.reason === "disconnect") {
-    return "Opponent disconnected.";
-  }
-
-  if (result.reason === "left") {
-    return "Opponent left the match.";
-  }
-
-  if (result.reason === "timeUp") {
-    return "Time ran out.";
-  }
-
-  return "";
+  multiplayer.resultTimer = window.setTimeout(resolveMultiplayerResult, MULTIPLAYER_SIMULTANEOUS_WINDOW + 80);
 }
 
 function clearMultiplayerResultTimer() {
@@ -3087,9 +3040,90 @@ function clearMultiplayerResultTimer() {
   }
 }
 
-// ============================================
-// MULTIPLAYER DISCONNECT DETECTION
-// ============================================
+function resolveMultiplayerResult() {
+  if (multiplayer.result) {
+    return;
+  }
+
+  const deaths = Object.values(multiplayer.deaths);
+
+  if (!deaths.length) {
+    return;
+  }
+
+  let result;
+
+  if (deaths.length === 1) {
+    const death = deaths[0];
+
+    if (Date.now() - death.diedAt < MULTIPLAYER_SIMULTANEOUS_WINDOW) {
+      scheduleMultiplayerResultCheck();
+      return;
+    }
+
+    result = {
+      winnerId: getOtherMultiplayerPlayerId(death.playerId),
+      loserId: death.playerId,
+      reason: death.reason,
+      scores: getMultiplayerScoreMap()
+    };
+  } else {
+    const sorted = deaths.sort((first, second) => first.diedAt - second.diedAt);
+    const first = sorted[0];
+    const second = sorted[1];
+    const simultaneous = Math.abs(first.diedAt - second.diedAt) <= MULTIPLAYER_SIMULTANEOUS_WINDOW;
+
+    if (simultaneous) {
+      if (first.score === second.score) {
+        result = {
+          winnerId: "",
+          loserId: "",
+          reason: "draw",
+          scores: getMultiplayerScoreMap()
+        };
+      } else {
+        const winner = first.score > second.score ? first : second;
+        const loser = first.score > second.score ? second : first;
+        result = {
+          winnerId: winner.playerId,
+          loserId: loser.playerId,
+          reason: "score",
+          scores: getMultiplayerScoreMap()
+        };
+      }
+    } else {
+      result = {
+        winnerId: second.playerId,
+        loserId: first.playerId,
+        reason: first.reason,
+        scores: getMultiplayerScoreMap()
+      };
+    }
+  }
+
+  sendMultiplayerBroadcast("match_result", result);
+  finishMultiplayerMatch(result);
+}
+
+function getOtherMultiplayerPlayerId(playerId) {
+  const other = multiplayer.players.find((player) => player.playerId !== playerId);
+  return other ? other.playerId : multiplayer.matchOpponentId;
+}
+
+function getMultiplayerScoreMap() {
+  const scores = {};
+  scores[multiplayer.playerId] = game ? game.score : 0;
+
+  if (multiplayer.opponent) {
+    scores[multiplayer.opponent.playerId] = multiplayer.opponent.score;
+  }
+
+  Object.values(multiplayer.deaths).forEach((death) => {
+    scores[death.playerId] = death.score;
+  });
+
+  return scores;
+}
 
 function checkMultiplayerDisconnect() {
   if (multiplayer.result || !multiplayer.matchHadOpponent) {
@@ -3115,99 +3149,84 @@ function checkMultiplayerDisconnect() {
   finishMultiplayerDisconnect();
 }
 
-// ============================================
-// MULTIPLAYER UI MANAGEMENT
-// ============================================
-
-function renderMultiplayerScreen() {
-  const inRoom = Boolean(multiplayer.channel);
-
-  multiplayerSetup.classList.toggle("hidden", inRoom);
-  multiplayerLobby.classList.toggle("hidden", !inRoom);
-  multiplayerRoomCode.textContent = multiplayer.roomCode || "----";
-  multiplayerReadyButton.textContent = multiplayer.ready ? "Ready!" : "Ready";
-  multiplayerReadyButton.disabled = !multiplayer.subscribed || multiplayer.status === "starting" || multiplayer.status === "playing";
-
-  if (!inRoom) {
-    multiplayerPlayerList.innerHTML = "";
-    multiplayerLobbyCountdown.textContent = "Waiting for two ready players.";
+function finishMultiplayerDisconnect() {
+  if (!game || !game.onlineDuel || multiplayer.result) {
     return;
   }
 
-  renderMultiplayerPlayers();
-  updateMultiplayerLobbyText();
+  const result = {
+    winnerId: multiplayer.playerId,
+    loserId: getOtherMultiplayerPlayerId(multiplayer.playerId),
+    reason: "disconnect",
+    scores: getMultiplayerScoreMap()
+  };
+
+  sendMultiplayerBroadcast("match_result", result);
+  finishMultiplayerMatch(result);
 }
 
-function renderMultiplayerPlayers() {
-  multiplayerPlayerList.innerHTML = "";
-
-  for (let index = 0; index < MULTIPLAYER_MAX_PLAYERS; index += 1) {
-    const player = multiplayer.players[index];
-    const row = document.createElement("div");
-    const image = document.createElement("img");
-    const copy = document.createElement("div");
-    const name = document.createElement("strong");
-    const meta = document.createElement("span");
-    const state = document.createElement("span");
-    const character = getCharacter(player && player.characterId);
-    const isCurrentPlayer = player && player.id === multiplayer.playerId;
-
-    // Win streak display (WL format or current streak for self)
-    let streakText = "";
-    if (player && player.id === multiplayer.playerId) {
-      const wins = saveState.wins || 0;
-      const losses = saveState.losses || 0;
-      const streak = saveState.winStreak || 0;
-      streakText = streak > 0 ? ` - 🔥 ${streak} streak` : ` - ${wins}W ${losses}L`;
-    } else if (player) {
-      // For opponent, we'll show their win/loss if available via presence
-      streakText = player.winStreak ? ` - 🔥 ${player.winStreak} streak` : (player.wins || player.losses ? ` - ${player.wins || 0}W ${player.losses || 0}L` : "");
-    }
-
-    row.className = "multiplayer-player";
-    image.src = character.asset;
-    image.alt = character.name;
-    copy.className = "multiplayer-player-copy";
-    name.textContent = player ? player.name : "Waiting...";
-    meta.textContent = player ? `${player.role === "host" ? "Host" : "Guest"} - ${character.name}${streakText}` : "Invite a friend";
-    state.className = `multiplayer-player-state ${player && player.ready ? "is-ready" : "is-waiting"}`;
-    state.textContent = player ? (player.ready ? "Ready" : "Waiting") : "Open";
-    copy.append(name, meta);
-    row.append(image, copy, state);
-    multiplayerPlayerList.appendChild(row);
+function finishMultiplayerMatch(result) {
+  if (!game || !game.onlineDuel || multiplayer.result) {
+    return;
   }
+
+  multiplayer.result = result;
+  multiplayer.status = "ended";
+  clearMultiplayerResultTimer();
+
+  if (game.running) {
+    game.running = false;
+  }
+
+  saveMultiplayerRunXp();
+  pauseOverlay.classList.add("hidden");
+  countdownOverlay.classList.add("hidden");
+  restartButton.textContent = "Back To Lobby";
+  const isDraw = !result.winnerId;
+  const didWin = result.winnerId === multiplayer.playerId;
+  const didLose = result.loserId === multiplayer.playerId;
+  gameOverTitle.textContent = isDraw ? "Draw" : didWin ? "Victory" : didLose ? "Defeat" : "Match Over";
+  gameOverMessage.textContent = getMultiplayerResultMessage(result);
+  gameOverMessage.classList.remove("hidden");
+  finalScore.textContent = game.score;
+  finalBest.textContent = getModeBest("classic");
+  finalTotalXp.textContent = saveState.xp;
+  prepareLeaderboardSubmit();
+  gameOverOverlay.classList.remove("hidden");
+  trackMultiplayerPresence({ ready: false });
 }
 
-function updateMultiplayerLobbyText() {
-  if (multiplayer.status === "starting") {
-    multiplayerLobbyCountdown.textContent = "Starting duel...";
-    showMultiplayerStatus("Both players are ready. Launching match.", "success");
+function getMultiplayerResultMessage(result) {
+  if (result.reason === "draw") {
+    return "Both players tied during the final fall.";
+  }
+
+  if (result.reason === "disconnect") {
+    return result.winnerId === multiplayer.playerId ? "Opponent disconnected." : "Connection lost.";
+  }
+
+  if (result.reason === "left") {
+    return result.winnerId === multiplayer.playerId ? "Opponent left the duel." : "You left the duel.";
+  }
+
+  if (result.reason === "score") {
+    return "Both players fell together. Higher score wins.";
+  }
+
+  return result.winnerId === multiplayer.playerId ? "Your opponent fell first." : "You fell first.";
+}
+
+function saveMultiplayerRunXp() {
+  if (!game || game.xpSaved) {
     return;
   }
 
-  if (multiplayer.status === "playing") {
-    multiplayerLobbyCountdown.textContent = "Match in progress.";
-    showMultiplayerStatus("Online duel is live.", "success");
-    return;
-  }
-
-  const playerCount = multiplayer.players.length;
-
-  if (playerCount < MULTIPLAYER_MAX_PLAYERS) {
-    multiplayerLobbyCountdown.textContent = "Waiting for one more player.";
-    showMultiplayerStatus("Share the room code with a friend.", "");
-    return;
-  }
-
-  if (multiplayer.players.every((player) => player.ready)) {
-    const selectedMode = GAME_MODES[multiplayer.selectedMode] || GAME_MODES.classic;
-    multiplayerLobbyCountdown.textContent = `Both players ready. Mode: ${selectedMode.label}`;
-    showMultiplayerStatus("Starting as soon as the host syncs the seed.", "success");
-    return;
-  }
-
-  multiplayerLobbyCountdown.textContent = "Both players must press Ready.";
-  showMultiplayerStatus("Waiting on ready checks.", "");
+  const scoreXp = Math.floor(game.score / 20);
+  const earned = scoreXp + game.xpRun;
+  game.finalXpEarned = earned;
+  game.xpSaved = true;
+  saveState.xp += earned;
+  saveData();
 }
 
 function resetMultiplayerLobby(shouldBroadcast = true) {
@@ -3241,43 +3260,2130 @@ function resetMultiplayerLobby(shouldBroadcast = true) {
   showScreen(multiplayerScreen);
 }
 
-function showMultiplayerStatus(message, type = "") {
-  multiplayerStatus.textContent = message;
-  multiplayerStatus.className = `multiplayer-status ${type}`;
-}
-
-function showMultiplayer() {
-  showScreen(multiplayerScreen);
-  renderMultiplayerScreen();
-}
-
-// ============================================
-// MULTIPLAYER XP MANAGEMENT
-// ============================================
-
-function saveMultiplayerRunXp(bonusXp = 0) {
-  if (!game || game.xpSaved) {
+function copyMultiplayerRoomCode() {
+  if (!multiplayer.roomCode) {
     return;
   }
 
-  const scoreXp = Math.floor(game.score / 20);
-  const earned = scoreXp + game.xpRun + bonusXp;
-  game.finalXpEarned = earned;
-  game.xpSaved = true;
-  saveState.xp += earned;
-  saveData();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(multiplayer.roomCode).then(() => {
+      showMultiplayerStatus("Room code copied.", "success");
+    }).catch(() => {
+      showMultiplayerStatus(`Room code: ${multiplayer.roomCode}`, "");
+    });
+    return;
+  }
+
+  showMultiplayerStatus(`Room code: ${multiplayer.roomCode}`, "");
 }
 
-// ============================================
-// MULTIPLAYER LEADERBOARD MODULE
-// ============================================
+function renderGameModes() {
+  modeList.innerHTML = "";
+
+  Object.values(GAME_MODES).forEach((mode) => {
+    const card = document.createElement("button");
+    const copy = document.createElement("span");
+    const title = document.createElement("strong");
+    const description = document.createElement("span");
+    const best = document.createElement("span");
+
+    card.className = "mode-card";
+    title.textContent = mode.label;
+    description.textContent = mode.description;
+    best.textContent = `Best: ${getModeBest(mode.id)}`;
+    best.className = "mode-best";
+    copy.append(title, description, best);
+    card.appendChild(copy);
+    card.addEventListener("click", () => startGame(mode.id));
+    modeList.appendChild(card);
+  });
+}
+
+function getModeBest(modeId) {
+  return Number(saveState.modeBests[modeId]) || 0;
+}
+
+function getCharacter(id) {
+  return CHARACTERS.find((character) => character.id === id) || CHARACTERS[0];
+}
+
+function normalizeCharacters(characters) {
+  const source = Array.isArray(characters) && characters.length ? characters : DEFAULT_CHARACTER_CONFIG;
+  const seenIds = new Set();
+  const normalized = [];
+
+  source.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+
+    const file = typeof entry.file === "string" && entry.file.trim() ? entry.file.trim() : "";
+    const assetInput = typeof entry.asset === "string" && entry.asset.trim() ? entry.asset.trim() : "";
+
+    if (!file && !assetInput) {
+      return;
+    }
+
+    const asset = assetInput || `${CHARACTER_ASSET_BASE_PATH}${file}`;
+    const id = getCharacterId(entry, file, index);
+    const price = Number(entry.price);
+
+    if (seenIds.has(id)) {
+      return;
+    }
+
+    seenIds.add(id);
+    normalized.push({
+      id,
+      name: getCharacterName(entry, file),
+      file,
+      asset,
+      price: Number.isFinite(price) && price > 0 ? Math.round(price) : 0,
+      section: getCharacterSection(entry),
+      limitedTime: Boolean(entry.limitedTime),
+      rarity: getCharacterRarity(entry),
+      fill: typeof entry.fill === "string" ? entry.fill : "#35c2ff",
+      face: typeof entry.face === "string" ? entry.face : "#061019",
+      ring: typeof entry.ring === "string" ? entry.ring : "#ffffff"
+    });
+  });
+
+  if (!normalized.length && source !== DEFAULT_CHARACTER_CONFIG) {
+    return normalizeCharacters(DEFAULT_CHARACTER_CONFIG);
+  }
+
+  return normalized;
+}
+
+function getCharacterId(entry, file, index) {
+  const rawId = typeof entry.id === "string" && entry.id.trim()
+    ? entry.id.trim()
+    : getCharacterName(entry, file).toLowerCase();
+  const id = rawId
+    .replace(/\.[^/.]+$/, "")
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+
+  return id || `character-${index + 1}`;
+}
+
+function getCharacterName(entry, file) {
+  if (typeof entry.name === "string" && entry.name.trim()) {
+    return entry.name.trim();
+  }
+
+  return file.replace(/\.[^/.]+$/, "").trim() || "Character";
+}
+
+function getCharacterSection(entry) {
+  if (typeof entry.section === "string" && entry.section.trim()) {
+    return entry.section.trim();
+  }
+
+  return entry.limitedTime ? "Limited" : DEFAULT_CHARACTER_SECTION;
+}
+
+function getCharacterRarity(entry) {
+  const rarity = typeof entry.rarity === "string" ? entry.rarity.trim().toLowerCase() : "";
+  const normalized = rarity === "blue" ? "uncommon" : rarity === "geen" ? "common" : rarity;
+
+  if (CHARACTER_RARITIES[normalized]) {
+    return CHARACTER_RARITIES[normalized].label;
+  }
+
+  return entry.limitedTime ? CHARACTER_RARITIES.rare.label : CHARACTER_RARITIES.common.label;
+}
+
+function getRarityMeta(character) {
+  const rarity = typeof character.rarity === "string" ? character.rarity.trim().toLowerCase() : "";
+  const key = rarity === "blue" ? "uncommon" : rarity === "geen" ? "common" : rarity;
+
+  return CHARACTER_RARITIES[key] || CHARACTER_RARITIES.common;
+}
+
+function loadCharacterImages() {
+  CHARACTERS.forEach((character) => {
+    const image = new Image();
+    image.src = character.asset;
+    characterImages[character.id] = image;
+  });
+}
+
+function loadBackgroundAdImages() {
+  BACKGROUND_AD_ASSETS.forEach((src) => {
+    const image = new Image();
+    image.src = src;
+    backgroundAdImages.push(image);
+  });
+}
+
+function normalizePowerups(powerups) {
+  const source = Array.isArray(powerups) ? powerups : DEFAULT_POWERUPS;
+
+  return source
+    .map((entry) => {
+      const rarity = Number(entry.rarity);
+      const duration = Number(entry.duration);
+      const sizeBonus = Number(entry.sizeBonus);
+      const xpMultiplier = Number(entry.xpMultiplier);
+      const boostVelocity = Number(entry.boostVelocity);
+
+      return {
+        id: typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : "",
+        name: typeof entry.name === "string" ? entry.name : "Powerup",
+        emoji: typeof entry.emoji === "string" ? entry.emoji : "?",
+        rarity: Number.isFinite(rarity) && rarity > 0 ? rarity : 1,
+        effect: typeof entry.effect === "string" ? entry.effect : "",
+        sizeBonus: Number.isFinite(sizeBonus) ? sizeBonus : 0,
+        xpMultiplier: Number.isFinite(xpMultiplier) && xpMultiplier > 0 ? xpMultiplier : 1,
+        boostVelocity: Number.isFinite(boostVelocity) ? boostVelocity : -1100,
+        duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
+        message: typeof entry.message === "string" ? entry.message : "Powerup!"
+      };
+    })
+    .filter((entry) => entry.id && entry.effect);
+}
+
+function renderStore() {
+  storeXp.textContent = saveState.xp;
+  renderStoreTabs();
+  storeList.innerHTML = "";
+
+  const characters = getStoreCharacters();
+
+  if (!characters.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-store";
+    empty.textContent = "Nothing here yet.";
+    storeList.appendChild(empty);
+    return;
+  }
+
+  characters.forEach((character) => {
+    const owned = saveState.ownedCharacters.includes(character.id);
+    const equipped = saveState.equippedCharacter === character.id;
+    const item = document.createElement("div");
+    item.className = "shop-item";
+
+    const preview = createCharacterPreview(character);
+
+    const copy = document.createElement("div");
+    copy.className = "item-copy";
+    const title = createItemTitle(character);
+    const price = document.createElement("span");
+    price.textContent = character.price === 0 ? "Free" : `${character.price} XP`;
+    copy.append(title, price);
+
+    const action = document.createElement("button");
+    if (!owned) {
+      action.textContent = "Buy";
+      action.disabled = saveState.xp < character.price;
+      action.addEventListener("click", () => buyCharacter(character.id));
+    } else if (equipped) {
+      action.textContent = "Owned";
+      action.disabled = true;
+    } else {
+      action.textContent = "Equip";
+      action.addEventListener("click", () => equipCharacter(character.id));
+    }
+
+    item.append(preview, copy, action);
+    storeList.appendChild(item);
+  });
+}
+
+function renderStoreTabs() {
+  const sections = getStoreSections();
+
+  if (!sections.includes(activeStoreSection)) {
+    activeStoreSection = sections[0] || DEFAULT_CHARACTER_SECTION;
+  }
+
+  storeTabs.innerHTML = "";
+
+  sections.forEach((section) => {
+    const tab = document.createElement("button");
+    const selected = section === activeStoreSection;
+
+    tab.type = "button";
+    tab.textContent = section;
+    tab.className = selected ? "is-selected" : "";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+    tab.addEventListener("click", () => {
+      activeStoreSection = section;
+      renderStore();
+    });
+    storeTabs.appendChild(tab);
+  });
+}
+
+function getStoreCharacters() {
+  return [...CHARACTERS]
+    .filter((character) => character.section === activeStoreSection)
+    .sort(compareCharactersForStore);
+}
+
+function getStoreSections() {
+  return [...new Set(CHARACTERS.map((character) => character.section || DEFAULT_CHARACTER_SECTION))]
+    .sort(compareSections);
+}
+
+function compareCharactersForStore(first, second) {
+  const sectionSort = compareSections(first.section, second.section);
+
+  if (sectionSort !== 0) {
+    return sectionSort;
+  }
+
+  if (first.price !== second.price) {
+    return first.price - second.price;
+  }
+
+  return first.name.localeCompare(second.name);
+}
+
+function compareSections(first, second) {
+  const firstRank = getSectionRank(first);
+  const secondRank = getSectionRank(second);
+
+  if (firstRank !== secondRank) {
+    return firstRank - secondRank;
+  }
+
+  return first.localeCompare(second);
+}
+
+function getSectionRank(section) {
+  const index = CHARACTER_SECTION_ORDER.indexOf(section);
+  return index === -1 ? CHARACTER_SECTION_ORDER.length : index;
+}
+
+function createItemTitle(character) {
+  const title = document.createElement("div");
+  const name = document.createElement("strong");
+  const rarityMeta = getRarityMeta(character);
+  const rarityBadge = document.createElement("span");
+
+  title.className = "item-title";
+  name.textContent = character.name;
+  rarityBadge.className = `rarity-badge ${rarityMeta.className}`;
+  rarityBadge.textContent = rarityMeta.label;
+  title.append(name, rarityBadge);
+
+  if (character.limitedTime) {
+    const badge = document.createElement("span");
+    badge.className = "limited-badge";
+    badge.textContent = "Limited";
+    title.appendChild(badge);
+  }
+
+  return title;
+}
+
+async function redeemCode() {
+  if (isAccountBanned()) {
+    updateBannedState();
+    return;
+  }
+
+  const code = redeemInput.value.trim().toLowerCase();
+
+  if (!code) {
+    setRedeemMessage("Enter a code first.", "error");
+    return;
+  }
+
+  if (redeemLoading) {
+    return;
+  }
+
+  if (saveState.redeemedCodes.includes(code)) {
+    setRedeemMessage("That code was already redeemed.", "error");
+    return;
+  }
+
+  if (!leaderboardClient) {
+    setRedeemMessage("Code server is offline right now.", "error");
+    return;
+  }
+
+  redeemLoading = true;
+  redeemButton.disabled = true;
+  setRedeemMessage("Checking code...", "");
+
+  const { data, error } = await leaderboardClient.rpc(STORE_CODE_RPC, { p_code: code });
+
+  redeemLoading = false;
+  redeemButton.disabled = false;
+
+  if (error) {
+    setRedeemMessage("Could not check that code.", "error");
+    return;
+  }
+
+  const reward = normalizeRedeemReward(data);
+
+  if (!reward.active) {
+    setRedeemMessage("That code is not active.", "error");
+    return;
+  }
+
+  if (reward.xp) {
+    saveState.xp += reward.xp;
+  }
+
+  if (reward.characterId && !saveState.ownedCharacters.includes(reward.characterId) && CHARACTERS.some((character) => character.id === reward.characterId)) {
+    saveState.ownedCharacters.push(reward.characterId);
+  }
+
+  saveState.redeemedCodes.push(code);
+  saveData();
+  redeemInput.value = "";
+  setRedeemMessage(reward.message || "Code redeemed.", "success");
+  renderStore();
+  updateMenuStats();
+}
+
+function normalizeRedeemReward(data) {
+  const reward = data && typeof data === "object" ? data : {};
+  const xp = Number(reward.xp);
+
+  return {
+    active: reward.active === true,
+    xp: Number.isFinite(xp) && xp > 0 ? Math.round(xp) : 0,
+    characterId: typeof reward.characterId === "string" ? reward.characterId : "",
+    message: typeof reward.message === "string" && reward.message.trim() ? reward.message : "Code redeemed."
+  };
+}
+
+function setRedeemMessage(message, type = "") {
+  redeemMessage.textContent = message;
+  redeemMessage.classList.toggle("success", type === "success");
+  redeemMessage.classList.toggle("error", type === "error");
+}
+
+function renderCharacterSelect() {
+  characterList.innerHTML = "";
+
+  CHARACTERS
+    .filter((character) => saveState.ownedCharacters.includes(character.id))
+    .sort(compareCharactersForStore)
+    .forEach((character) => {
+      const equipped = saveState.equippedCharacter === character.id;
+      const item = document.createElement("div");
+      item.className = "shop-item";
+
+      const preview = createCharacterPreview(character);
+
+      const copy = document.createElement("div");
+      copy.className = "item-copy";
+      const title = createItemTitle(character);
+      const status = document.createElement("span");
+      status.textContent = equipped ? "Equipped" : "Owned";
+      if (equipped) {
+        status.className = "equipped-badge";
+      }
+      copy.append(title, status);
+
+      const action = document.createElement("button");
+      action.textContent = equipped ? "Equipped" : "Equip";
+      action.disabled = equipped;
+      action.addEventListener("click", () => equipCharacter(character.id));
+
+      item.append(preview, copy, action);
+      characterList.appendChild(item);
+    });
+}
+
+function createCharacterPreview(character) {
+  const preview = document.createElement("div");
+  const image = document.createElement("img");
+
+  preview.className = "character-preview";
+  preview.style.backgroundColor = character.fill;
+  preview.style.borderColor = character.ring;
+  image.src = character.asset;
+  image.alt = character.name;
+  preview.appendChild(image);
+
+  return preview;
+}
+
+function buyCharacter(characterId) {
+  if (isAccountBanned()) {
+    updateBannedState();
+    return;
+  }
+
+  const character = getCharacter(characterId);
+
+  if (saveState.ownedCharacters.includes(character.id) || saveState.xp < character.price) {
+    renderStore();
+    return;
+  }
+
+  saveState.xp -= character.price;
+  saveState.ownedCharacters.push(character.id);
+  saveState.equippedCharacter = character.id;
+  saveData();
+  renderStore();
+}
+
+function equipCharacter(characterId) {
+  if (isAccountBanned()) {
+    updateBannedState();
+    return;
+  }
+
+  if (!saveState.ownedCharacters.includes(characterId)) {
+    return;
+  }
+
+  saveState.equippedCharacter = characterId;
+  saveData();
+  renderStore();
+  renderCharacterSelect();
+}
+
+function resizeCanvas() {
+  const rect = gameFrame.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(240, Math.round(rect.width));
+  const height = Math.max(360, Math.round(rect.height));
+
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  if (game) {
+    game.width = width;
+    game.height = height;
+  }
+}
+
+function createPlatform(x, y, type = "normal", modeConfig = null, worldWidth = 420, rng = Math.random) {
+  const sizes = {
+    small: { width: 50, height: 12 },
+    normal: { width: 72, height: 14 },
+    large: { width: 100, height: 16 },
+    moving: { width: 86, height: 14 },
+    touch: { width: 78, height: 14 }
+  };
+  const random = typeof rng === "function" ? rng : Math.random;
+  const powerup = modeConfig ? rollPowerup(modeConfig, random) : null;
+  const width = sizes[type].width;
+  const moveRange = type === "moving" ? 48 + random() * 62 : 0;
+  const minX = Math.max(0, x - moveRange);
+  const maxX = Math.min(worldWidth - width, x + moveRange);
+
+  return {
+    x,
+    baseX: x,
+    y,
+    width,
+    height: sizes[type].height,
+    type,
+    moveMinX: minX,
+    moveMaxX: maxX,
+    movePhase: random() * Math.PI * 2,
+    moveSpeed: 1.2 + random() * 0.8,
+    touched: false,
+    bouncePad: random() < 0.12,
+    coin: !powerup && random() < 0.22,
+    coinCollected: false,
+    powerup,
+    powerupCollected: false
+  };
+}
+
+function rollPowerup(modeConfig, rng = Math.random) {
+  const random = typeof rng === "function" ? rng : Math.random;
+
+  if (!powerupDefinitions.length || random() > modeConfig.powerupChance) {
+    return null;
+  }
+
+  const totalRarity = powerupDefinitions.reduce((total, powerup) => total + powerup.rarity, 0);
+  let roll = random() * totalRarity;
+
+  for (const powerup of powerupDefinitions) {
+    roll -= powerup.rarity;
+
+    if (roll <= 0) {
+      return powerup.id;
+    }
+  }
+
+  return powerupDefinitions[powerupDefinitions.length - 1].id;
+}
+
+function randomPlatformType(rng = Math.random) {
+  const random = typeof rng === "function" ? rng : Math.random;
+  const roll = random();
+
+  if (roll < 0.16) {
+    return "small";
+  }
+
+  if (roll < 0.70) {
+    return "normal";
+  }
+
+  if (roll < 0.82) {
+    return "moving";
+  }
+
+  if (roll < 0.92) {
+    return "touch";
+  }
+
+  if (roll > 0.92) {
+    return "large";
+  }
+
+  return "normal";
+}
+
+function seedPlatforms(width, height, modeConfig, rng = Math.random) {
+  const random = typeof rng === "function" ? rng : Math.random;
+  const platforms = [];
+  const startPlatformY = height - 95;
+  const startPlatform = createPlatform(width / 2 - 50, startPlatformY, "large", null, width, random);
+  startPlatform.bouncePad = false;
+  startPlatform.coin = false;
+  platforms.push(startPlatform);
+
+  let nextY = startPlatformY - 82;
+  let nextCenter = width / 2;
+  while (nextY > -1100) {
+    const type = randomPlatformType(random);
+    const platformWidth = getPlatformWidth(type);
+    const x = pickPlatformX(nextCenter, platformWidth, width, random);
+    nextCenter = x + platformWidth / 2;
+    platforms.push(createPlatform(x, nextY, type, modeConfig, width, random));
+    nextY -= 72 + random() * 48;
+  }
+
+  return {
+    platforms,
+    nextY,
+    nextCenter
+  };
+}
+
+function pickPlatformX(previousCenter, platformWidth, width, rng = Math.random) {
+  const random = typeof rng === "function" ? rng : Math.random;
+  const margin = platformWidth / 2 + 8;
+  const maxStep = Math.min(width * 0.44, 175);
+  const centerPull = (width / 2 - previousCenter) * 0.5;
+  const offset = (random() * 2 - 1) * maxStep + centerPull;
+  let center = previousCenter + offset;
+
+  if (random() < 0.18) {
+    center = width * (0.34 + random() * 0.32);
+  }
+
+  center = Math.max(margin, Math.min(width - margin, center));
+
+  return center - platformWidth / 2;
+}
+
+function getPlatformWidth(type) {
+  if (type === "small") {
+    return 50;
+  }
+
+  if (type === "large") {
+    return 100;
+  }
+
+  if (type === "moving") {
+    return 86;
+  }
+
+  if (type === "touch") {
+    return 78;
+  }
+
+  return 72;
+}
+
+function startGame(modeId = "classic", options = {}) {
+  if (isAccountBanned()) {
+    updateBannedState();
+    return;
+  }
+
+  stopGameLoop();
+  showScreen(gameScreen);
+  resizeCanvas();
+  resetInput();
+
+  const mode = GAME_MODES[modeId] || GAME_MODES.classic;
+  const width = canvas.clientWidth || 420;
+  const height = canvas.clientHeight || 720;
+  const isOnlineDuel = Boolean(options.onlineDuel);
+  const rng = options.seed ? createSeededRandom(options.seed) : Math.random;
+  const seeded = seedPlatforms(width, height, mode, rng);
+  const startY = height - 95 - 48;
+
+  game = {
+    mode: mode.id,
+    modeLabel: isOnlineDuel ? "Online Duel" : mode.label,
+    modeConfig: mode,
+    onlineDuel: isOnlineDuel,
+    matchSeed: options.seed || "",
+    roomCode: options.roomCode || "",
+    width,
+    height,
+    running: true,
+    paused: false,
+    countdownActive: true,
+    countdownTime: COUNTDOWN_START,
+    score: 0,
+    xpRun: 0,
+    coinsCollected: 0,
+    powerupsCollected: 0,
+    platformStreak: 0,
+    bestPlatformStreak: 0,
+    finalXpEarned: 0,
+    leaderboardSubmitted: false,
+    adminAffected: false,
+    adminFakeLagUntil: 0,
+    xpSaved: false,
+    rng,
+    multiplayerLastStateSentAt: 0,
+    multiplayerLastPresenceSentAt: 0,
+    multiplayerDeathSent: false,
+    antiCheat: null,
+    runTime: 0,
+    timeLimit: mode.timeLimit,
+    timeRemaining: mode.timeLimit,
+    timeElapsed: 0,
+    startY,
+    highestPoint: startY,
+    cameraY: 0,
+    nextPlatformY: seeded.nextY,
+    nextPlatformCenter: seeded.nextCenter,
+    platforms: seeded.platforms,
+    backgroundAds: [],
+    nextBackgroundAdAt: BACKGROUND_AD_INTERVAL_SECONDS,
+    particles: [],
+    effects: {
+      xpMultiplier: 1,
+      xpMultiplierUntil: 0,
+      message: "",
+      messageUntil: 0
+    },
+    player: {
+      x: width / 2 - 24,
+      y: startY,
+      width: 48,
+      height: 48,
+      maxSize: 76,
+      vx: 0,
+      vy: getJumpVelocityForRamp(1, mode),
+      onScreen: true
+    }
+  };
+
+  lastFrameTime = performance.now();
+  markAntiCheatCheckpoint();
+  startAdminLiveRouting();
+  hideRunOverlays();
+  updateCountdownOverlay();
+  updateHud();
+  drawGame();
+  animationFrameId = requestAnimationFrame(gameLoop);
+}
+
+function stopGameLoop() {
+  stopAdminLiveRouting();
+
+  if (animationFrameId !== null) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+
+  if (game) {
+    game.running = false;
+  }
+}
+
+function hideRunOverlays() {
+  gameOverOverlay.classList.add("hidden");
+  countdownOverlay.classList.add("hidden");
+  pauseOverlay.classList.add("hidden");
+  hideAdminJumpscare();
+  gameOverMessage.classList.add("hidden");
+  gameOverMessage.textContent = "";
+}
+
+function resetInput() {
+  input.left = false;
+  input.right = false;
+  input.touchLeft = false;
+  input.touchRight = false;
+  input.swipeBoost = 0;
+  input.gamepadX = 0;
+}
+
+function setPaused(paused) {
+  if (!game || !game.running || !gameScreen.classList.contains("active")) {
+    return;
+  }
+
+  game.paused = paused;
+  pauseOverlay.classList.toggle("hidden", !paused);
+
+  if (paused) {
+    resetInput();
+  }
+}
+
+function togglePause() {
+  if (!game || !game.running || !gameOverOverlay.classList.contains("hidden")) {
+    return;
+  }
+
+  if (game.onlineDuel) {
+    return;
+  }
+
+  setPaused(!game.paused);
+}
+
+function gameLoop(currentTime) {
+  if (!game || !game.running) {
+    return;
+  }
+
+  const deltaSeconds = Math.min(0.033, (currentTime - lastFrameTime) / 1000 || 0.016);
+  lastFrameTime = currentTime;
+
+  handleGamepadInput();
+
+  if (game.paused) {
+    drawGame();
+    updateHud();
+    animationFrameId = requestAnimationFrame(gameLoop);
+    return;
+  }
+
+  if (game.countdownActive) {
+    updateCountdown(deltaSeconds);
+    updateMultiplayerDuringGame({ checkDisconnect: false });
+    drawGame();
+    updateHud();
+    animationFrameId = requestAnimationFrame(gameLoop);
+    return;
+  }
+
+  if (isAdminFakeLagActive()) {
+    drawGame();
+    updateHud();
+    animationFrameId = requestAnimationFrame(gameLoop);
+    return;
+  }
+
+  updateGame(deltaSeconds);
+  drawGame();
+
+  animationFrameId = requestAnimationFrame(gameLoop);
+}
+
+function updateCountdown(deltaSeconds) {
+  game.countdownTime -= deltaSeconds;
+  updateCountdownOverlay();
+
+  if (game.countdownTime <= 0) {
+    game.countdownActive = false;
+    countdownOverlay.classList.add("hidden");
+    trackMultiplayerPresence();
+  }
+}
+
+function updateCountdownOverlay() {
+  if (!game || !game.countdownActive) {
+    countdownOverlay.classList.add("hidden");
+    return;
+  }
+
+  countdownOverlay.classList.remove("hidden");
+
+  if (game.countdownTime > 2.8) {
+    countdownText.textContent = "3";
+  } else if (game.countdownTime > 1.8) {
+    countdownText.textContent = "2";
+  } else if (game.countdownTime > 0.8) {
+    countdownText.textContent = "1";
+  } else {
+    countdownText.textContent = "Go!";
+  }
+}
+
+function updateGame(deltaSeconds) {
+  if (!validateAntiCheatCheckpoint()) {
+    return;
+  }
+
+  const antiCheatFrame = getAntiCheatSnapshot();
+  game.runTime += deltaSeconds;
+  updateTimer(deltaSeconds);
+
+  if (!game.running) {
+    return;
+  }
+
+  const player = game.player;
+  const move = getMoveDirection();
+  const touchMoving = isTouchMoveActive();
+  const ramp = getModeRamp();
+  const sensitivity = getControlSensitivity();
+  const touchAccelerationScale = touchMoving ? 1.32 : 1;
+  const touchSpeedScale = touchMoving ? 1.18 : 1;
+  const acceleration = 3600 * sensitivity * touchAccelerationScale * game.modeConfig.speedScale * Math.min(1.45, 1 + (ramp - 1) * 0.5);
+  const maxSpeed = 380 * sensitivity * touchSpeedScale * game.modeConfig.speedScale * Math.min(1.35, 1 + (ramp - 1) * 0.35);
+  const gravity = 1500 * game.modeConfig.gravityScale * Math.min(1.45, 1 + (ramp - 1) * 0.35);
+  const friction = 0.9;
+
+  updatePlatforms(deltaSeconds);
+
+  if (move !== 0) {
+    player.vx += move * acceleration * deltaSeconds;
+  } else {
+    player.vx *= friction;
+  }
+
+  player.vx = Math.max(-maxSpeed, Math.min(maxSpeed, player.vx));
+  player.vy += gravity * deltaSeconds;
+
+  const previousBottom = player.y + player.height;
+  player.x += player.vx * deltaSeconds;
+  player.y += player.vy * deltaSeconds;
+
+  if (player.x + player.width < 0) {
+    player.x = game.width;
+  } else if (player.x > game.width) {
+    player.x = -player.width;
+  }
+
+  if (player.vy > 0) {
+    checkPlatformCollisions(previousBottom);
+  }
+
+  collectCoins();
+  collectPowerups();
+  updateActivePowerups();
+  updateCamera();
+  updateBackgroundAds();
+  generatePlatforms();
+  prunePlatforms();
+  updateParticles(deltaSeconds);
+  updateHud();
+  updateMultiplayerDuringGame();
+
+  if (!validateAntiCheatFrame(antiCheatFrame)) {
+    return;
+  }
+
+  markAntiCheatCheckpoint();
+
+  if (player.y - game.cameraY > game.height + 90) {
+    endGame("fell");
+  }
+}
+
+function updateTimer(deltaSeconds) {
+  if (!game.timeLimit) {
+    return;
+  }
+
+  game.timeElapsed += deltaSeconds;
+  game.timeRemaining = Math.max(0, game.timeLimit - game.timeElapsed);
+
+  if (game.timeRemaining <= 0) {
+    updateHud();
+    endGame("timeUp");
+  }
+}
+
+function getAntiCheatSnapshot() {
+  if (!game || !game.player) {
+    return null;
+  }
+
+  const player = game.player;
+
+  return {
+    x: player.x,
+    y: player.y,
+    vx: player.vx,
+    vy: player.vy,
+    width: player.width,
+    height: player.height,
+    score: game.score,
+    highestPoint: game.highestPoint
+  };
+}
+
+function markAntiCheatCheckpoint() {
+  if (!game) {
+    return;
+  }
+
+  game.antiCheat = getAntiCheatSnapshot();
+}
+
+function validateAntiCheatCheckpoint() {
+  if (!game || !game.running || game.countdownActive || game.paused || game.onlineDuel) {
+    return true;
+  }
+
+  const previous = game.antiCheat;
+  const current = getAntiCheatSnapshot();
+
+  if (!previous || !current) {
+    markAntiCheatCheckpoint();
+    return true;
+  }
+
+  if (!isAntiCheatSnapshotFinite(current)) {
+    triggerAntiCheat("invalid player state");
+    return false;
+  }
+
+  const positionChanged = Math.abs(current.x - previous.x) > ANTI_CHEAT_POSITION_TOLERANCE
+    || Math.abs(current.y - previous.y) > ANTI_CHEAT_POSITION_TOLERANCE;
+  const velocityChanged = Math.abs(current.vx - previous.vx) > ANTI_CHEAT_VELOCITY_TOLERANCE
+    || Math.abs(current.vy - previous.vy) > ANTI_CHEAT_VELOCITY_TOLERANCE;
+  const sizeChanged = Math.abs(current.width - previous.width) > 0.5
+    || Math.abs(current.height - previous.height) > 0.5;
+  const scoreChanged = current.score - previous.score > ANTI_CHEAT_SCORE_TOLERANCE;
+
+  if (positionChanged || velocityChanged || sizeChanged || scoreChanged) {
+    triggerAntiCheat("external movement change");
+    return false;
+  }
+
+  return true;
+}
+
+function validateAntiCheatFrame(previous) {
+  if (!game || !game.running || game.onlineDuel || !previous) {
+    return true;
+  }
+
+  const current = getAntiCheatSnapshot();
+
+  if (!isAntiCheatSnapshotFinite(current)) {
+    triggerAntiCheat("invalid player state");
+    return false;
+  }
+
+  const dx = Math.abs(current.x - previous.x);
+  const dy = current.y - previous.y;
+  const upwardStep = Math.max(0, -dy);
+  const downwardStep = Math.max(0, dy);
+  const expectedScoreLimit = Math.max(0, Math.floor((game.startY - game.highestPoint) / 10)) + 12;
+  const maxUpwardVelocity = Math.abs(getBouncePadVelocityForRamp(1.9, game.modeConfig)) + 360;
+  const maxHorizontalVelocity = 900 * getControlSensitivity() * game.modeConfig.speedScale;
+
+  if (dx > ANTI_CHEAT_MAX_HORIZONTAL_STEP && !isAllowedHorizontalWrap(previous, current)) {
+    triggerAntiCheat("impossible horizontal movement");
+    return false;
+  }
+
+  if (upwardStep > ANTI_CHEAT_MAX_UPWARD_STEP || downwardStep > ANTI_CHEAT_MAX_DOWNWARD_STEP) {
+    triggerAntiCheat("impossible vertical movement");
+    return false;
+  }
+
+  if (current.vy < -maxUpwardVelocity || Math.abs(current.vx) > maxHorizontalVelocity) {
+    triggerAntiCheat("impossible velocity");
+    return false;
+  }
+
+  if (current.width > game.player.maxSize || current.height > game.player.maxSize || current.width < 42 || current.height < 42) {
+    triggerAntiCheat("invalid player size");
+    return false;
+  }
+
+  if (current.score > expectedScoreLimit) {
+    triggerAntiCheat("impossible score");
+    return false;
+  }
+
+  return true;
+}
+
+function isAntiCheatSnapshotFinite(snapshot) {
+  return [
+    snapshot.x,
+    snapshot.y,
+    snapshot.vx,
+    snapshot.vy,
+    snapshot.width,
+    snapshot.height,
+    snapshot.score,
+    snapshot.highestPoint
+  ].every(Number.isFinite);
+}
+
+function isAllowedHorizontalWrap(previous, current) {
+  if (!game) {
+    return false;
+  }
+
+  const wrappedRight = previous.x + previous.width < 8 && Math.abs(current.x - game.width) < 12;
+  const wrappedLeft = previous.x > game.width - 8 && Math.abs(current.x + current.width) < 12;
+
+  return wrappedRight || wrappedLeft;
+}
+
+function triggerAntiCheat(reason) {
+  if (!game || game.antiCheatTriggered) {
+    return;
+  }
+
+  game.antiCheatTriggered = true;
+  stopGameLoop();
+  console.warn(`Anti-cheat triggered: ${reason}`);
+  window.location.href = CHEAT_REDIRECT_URL;
+}
+
+function getModeRamp() {
+  if (!game || !game.modeConfig.scoreRamp) {
+    return 1;
+  }
+
+  return Math.min(1.85, 1 + game.score / 700);
+}
+
+function getJumpVelocityForRamp(ramp, modeConfig = game.modeConfig) {
+  return -740 * ramp * modeConfig.jumpScale;
+}
+
+function getBouncePadVelocityForRamp(ramp, modeConfig = game.modeConfig) {
+  return -1050 * ramp * modeConfig.jumpScale;
+}
+
+function getMoveDirection() {
+  let direction = 0;
+  const sensitivity = getControlSensitivity();
+
+  if (input.left || input.touchLeft) {
+    direction -= 1;
+  }
+
+  if (input.right || input.touchRight) {
+    direction += 1;
+  }
+
+  direction += input.gamepadX * sensitivity;
+
+  if (input.swipeBoost !== 0) {
+    direction += input.swipeBoost * sensitivity;
+    input.swipeBoost *= 0.88;
+
+    if (Math.abs(input.swipeBoost) < 0.05) {
+      input.swipeBoost = 0;
+    }
+  }
+
+  return Math.max(-1, Math.min(1, direction));
+}
+
+function isTouchMoveActive() {
+  return input.touchLeft || input.touchRight || input.swipeBoost !== 0;
+}
+
+function checkPlatformCollisions(previousBottom) {
+  const player = game.player;
+  const playerBottom = player.y + player.height;
+  const playerCenterX = player.x + player.width / 2;
+  let landed = false;
+
+  game.platforms.forEach((platform) => {
+    if (landed || platform.touched) {
+      return;
+    }
+
+    const withinX = playerCenterX >= platform.x - 8 && playerCenterX <= platform.x + platform.width + 8;
+    const crossedTop = previousBottom <= platform.y && playerBottom >= platform.y;
+    const closeEnough = playerBottom <= platform.y + platform.height + 18;
+
+    if (withinX && crossedTop && closeEnough) {
+      const isPadHit = platform.bouncePad && playerCenterX >= platform.x + platform.width / 2 - 18 && playerCenterX <= platform.x + platform.width / 2 + 18;
+      const ramp = getModeRamp();
+      player.y = platform.y - player.height;
+      player.vy = isPadHit ? getBouncePadVelocityForRamp(ramp) : getJumpVelocityForRamp(ramp);
+      game.platformStreak += 1;
+      game.bestPlatformStreak = Math.max(game.bestPlatformStreak, game.platformStreak);
+      platform.touched = platform.type === "touch";
+      landed = true;
+      burst(platform.x + platform.width / 2, platform.y, isPadHit ? "#ff5f6d" : "#35c2ff");
+    }
+  });
+}
+
+function collectCoins() {
+  const player = game.player;
+  const playerCenterX = player.x + player.width / 2;
+  const playerCenterY = player.y + player.height / 2;
+
+  game.platforms.forEach((platform) => {
+    if (!platform.coin || platform.coinCollected) {
+      return;
+    }
+
+    const coinX = platform.x + platform.width / 2;
+    const coinY = platform.y - 24;
+    const distance = Math.hypot(playerCenterX - coinX, playerCenterY - coinY);
+
+    if (distance < 34) {
+      platform.coinCollected = true;
+      game.coinsCollected += 1;
+      gainRunXp(1);
+      burst(coinX, coinY, "#f5c542");
+    }
+  });
+}
+
+function collectPowerups() {
+  const player = game.player;
+  const playerCenterX = player.x + player.width / 2;
+  const playerCenterY = player.y + player.height / 2;
+
+  game.platforms.forEach((platform) => {
+    if (!platform.powerup || platform.powerupCollected) {
+      return;
+    }
+
+    const powerup = powerupById[platform.powerup];
+    const powerupX = platform.x + platform.width / 2;
+    const powerupY = platform.y - 48;
+    const distance = Math.hypot(playerCenterX - powerupX, playerCenterY - powerupY);
+
+    if (powerup && distance < 42) {
+      platform.powerupCollected = true;
+      game.powerupsCollected += 1;
+      applyPowerup(powerup);
+      burst(powerupX, powerupY, "#ffffff");
+    }
+  });
+}
+
+function gainRunXp(amount) {
+  game.xpRun += Math.max(0, Math.round(amount * getXpMultiplier()));
+}
+
+function getXpMultiplier() {
+  return game.effects.xpMultiplier || 1;
+}
+
+function applyPowerup(powerup) {
+  if (powerup.effect === "grow") {
+    growPlayer(powerup.sizeBonus || 6);
+  }
+
+  if (powerup.effect === "doubleXp") {
+    game.effects.xpMultiplier = powerup.xpMultiplier || 2;
+    game.effects.xpMultiplierUntil = game.runTime + (powerup.duration || 10);
+  }
+
+  if (powerup.effect === "boost") {
+    game.player.vy = powerup.boostVelocity || -1220;
+  }
+
+  game.effects.message = `${powerup.emoji} ${powerup.message}`;
+  game.effects.messageUntil = game.runTime + 2.4;
+}
+
+function growPlayer(sizeBonus) {
+  const player = game.player;
+  const oldCenterX = player.x + player.width / 2;
+  const oldCenterY = player.y + player.height / 2;
+  const nextSize = Math.min(player.maxSize, player.width + sizeBonus);
+
+  player.width = nextSize;
+  player.height = nextSize;
+  player.x = oldCenterX - player.width / 2;
+  player.y = oldCenterY - player.height / 2;
+}
+
+function updateActivePowerups() {
+  if (game.effects.xpMultiplierUntil && game.runTime >= game.effects.xpMultiplierUntil) {
+    game.effects.xpMultiplier = 1;
+    game.effects.xpMultiplierUntil = 0;
+  }
+}
+
+function updateCamera() {
+  const player = game.player;
+  const targetY = player.y - game.height * 0.42;
+
+  if (targetY < game.cameraY) {
+    game.cameraY = targetY;
+  }
+
+  if (player.y < game.highestPoint) {
+    game.highestPoint = player.y;
+    game.score = Math.max(game.score, Math.floor((game.startY - game.highestPoint) / 10));
+  }
+}
+
+function generatePlatforms() {
+  while (game.nextPlatformY > game.cameraY - 900) {
+    const random = game.rng || Math.random;
+    const ramp = getModeRamp();
+    const gapScale = game.modeConfig.gapScale * Math.min(1.22, 1 + (ramp - 1) * 0.24);
+    const type = randomPlatformType(random);
+    const width = getPlatformWidth(type);
+    const x = pickPlatformX(game.nextPlatformCenter, width, game.width, random);
+    game.nextPlatformCenter = x + width / 2;
+    game.platforms.push(createPlatform(x, game.nextPlatformY, type, game.modeConfig, game.width, random));
+    game.nextPlatformY -= (72 + random() * 48) * gapScale;
+  }
+}
+
+function prunePlatforms() {
+  game.platforms = game.platforms.filter((platform) => !platform.touched && platform.y - game.cameraY < game.height + 140);
+}
+
+function updatePlatforms(deltaSeconds) {
+  game.platforms.forEach((platform) => {
+    if (platform.type !== "moving") {
+      return;
+    }
+
+    const midpoint = (platform.moveMinX + platform.moveMaxX) / 2;
+    const range = Math.max(0, (platform.moveMaxX - platform.moveMinX) / 2);
+    platform.x = midpoint + Math.sin(game.runTime * platform.moveSpeed + platform.movePhase) * range;
+  });
+}
+
+function updateBackgroundAds() {
+  if (!game || !Array.isArray(game.backgroundAds)) {
+    return;
+  }
+
+  if (game.runTime >= game.nextBackgroundAdAt) {
+    spawnBackgroundAd();
+    game.nextBackgroundAdAt = game.runTime + BACKGROUND_AD_INTERVAL_SECONDS + (game.rng ? game.rng() : Math.random()) * 24;
+  }
+
+  game.backgroundAds = game.backgroundAds.filter((ad) => {
+    const screenY = ad.y - game.cameraY;
+    return screenY < game.height + ad.height + 80;
+  });
+}
+
+function spawnBackgroundAd() {
+  const readyAds = backgroundAdImages.filter((image) => image.complete && image.naturalWidth > 0);
+
+  if (!readyAds.length) {
+    return;
+  }
+
+  const random = game.rng || Math.random;
+  const image = readyAds[Math.floor(random() * readyAds.length)];
+  const maxWidth = Math.min(250, game.width * 0.46);
+  const minWidth = Math.min(maxWidth, Math.max(130, game.width * 0.28));
+  const width = minWidth + random() * Math.max(0, maxWidth - minWidth);
+  const aspect = (image.naturalHeight || image.height || 1) / (image.naturalWidth || image.width || 1);
+  const height = Math.max(58, Math.min(150, width * aspect));
+  const margin = 18;
+  const side = random() < 0.5 ? "left" : "right";
+  const sideSpace = Math.max(0, game.width * 0.3 - margin);
+  const x = side === "left"
+    ? margin + random() * sideSpace
+    : game.width - width - margin - random() * sideSpace;
+  const y = game.cameraY + game.height * (0.24 + random() * 0.42);
+
+  game.backgroundAds.push({
+    image,
+    x: Math.max(margin, Math.min(game.width - width - margin, x)),
+    y,
+    width,
+    height,
+    rotation: (random() * 2 - 1) * 0.045,
+    alpha: 0.92
+  });
+}
+
+function updateParticles(deltaSeconds) {
+  game.particles.forEach((particle) => {
+    particle.life -= deltaSeconds;
+    particle.x += particle.vx * deltaSeconds;
+    particle.y += particle.vy * deltaSeconds;
+    particle.vy += 480 * deltaSeconds;
+  });
+
+  game.particles = game.particles.filter((particle) => particle.life > 0);
+}
+
+function burst(x, y, color) {
+  if (!saveState.settings.particles) {
+    return;
+  }
+
+  for (let index = 0; index < 8; index += 1) {
+    game.particles.push({
+      x,
+      y,
+      vx: Math.cos(index * 0.8) * (80 + Math.random() * 80),
+      vy: Math.sin(index * 0.8) * (80 + Math.random() * 80),
+      life: 0.32,
+      color
+    });
+  }
+}
+
+function updateHud() {
+  hudMode.textContent = game.modeLabel;
+  hudScore.textContent = game.score;
+  hudXp.textContent = game.xpRun;
+  hudTimerWrap.classList.toggle("hidden", !game.timeLimit);
+
+  if (game.timeLimit) {
+    hudTimer.textContent = Math.ceil(game.timeRemaining);
+  }
+
+  updatePowerupHud();
+}
+
+function updatePowerupHud() {
+  const effect = game.effects;
+  const xpActive = effect.xpMultiplier > 1 && effect.xpMultiplierUntil > game.runTime;
+  const messageActive = effect.message && effect.messageUntil > game.runTime;
+
+  if (!xpActive) {
+    hudPowerup.classList.add("hidden");
+    hudPowerup.textContent = "";
+  } else {
+    const seconds = Math.ceil(effect.xpMultiplierUntil - game.runTime);
+    hudPowerup.textContent = `🍟 XP x${effect.xpMultiplier} ${seconds}s`;
+    hudPowerup.classList.remove("hidden");
+  }
+
+  if (!messageActive) {
+    hudPowerupMessage.classList.add("hidden");
+    hudPowerupMessage.textContent = "";
+  } else {
+    hudPowerupMessage.textContent = effect.message;
+    hudPowerupMessage.classList.remove("hidden");
+  }
+}
+
+function endGame(reason = "fell") {
+  if (!game || !game.running) {
+    return;
+  }
+
+  if (game.onlineDuel) {
+    handleLocalMultiplayerDeath(reason);
+    return;
+  }
+
+  game.running = false;
+  game.paused = false;
+  stopAdminLiveRouting();
+  pauseOverlay.classList.add("hidden");
+  countdownOverlay.classList.add("hidden");
+  const scoreXp = Math.floor(game.score / 20);
+  const earned = scoreXp + game.xpRun;
+  game.finalXpEarned = earned;
+  saveState.xp += earned;
+  saveState.modeBests[game.mode] = Math.max(getModeBest(game.mode), game.score);
+  saveState.bestScore = saveState.modeBests.classic || 0;
+  saveState.timeTrialBestScore = saveState.modeBests.timeTrial || 0;
+
+  saveData();
+
+  restartButton.textContent = "Restart";
+  gameOverMessage.classList.add("hidden");
+  gameOverMessage.textContent = "";
+  gameOverTitle.textContent = reason === "timeUp" ? "Time Up" : reason === "paused" ? "Run Ended" : "Game Over";
+  finalScore.textContent = game.score;
+  finalBest.textContent = getModeBest(game.mode);
+  finalTotalXp.textContent = saveState.xp;
+  prepareLeaderboardSubmit();
+  gameOverOverlay.classList.remove("hidden");
+  autoSubmitLeaderboardScore();
+}
+
+function drawGame() {
+  ctx.clearRect(0, 0, game.width, game.height);
+  drawBackground();
+  drawBackgroundAds();
+  drawPlatforms();
+  drawParticles();
+  drawOpponentGhost();
+  drawPlayer();
+}
+
+function drawBackground() {
+  const settings = saveState.settings || DEFAULT_SETTINGS;
+  const theme = THEMES[settings.theme] || THEMES.red;
+
+  if (settings.backgroundImage && customBackgroundReady) {
+    drawCoverImage(customBackgroundImage, 0, 0, game.width, game.height);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.12)";
+    ctx.fillRect(0, 0, game.width, game.height);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+    for (let y = -((game.cameraY * 0.18) % 90); y < game.height; y += 90) {
+      ctx.fillRect(0, y, game.width, 2);
+    }
+    return;
+  }
+
+  ctx.fillStyle = theme.canvasBg;
+  ctx.fillRect(0, 0, game.width, game.height);
+
+  const centerX = game.width / 2;
+  const centerY = game.height * 0.52;
+  const radius = Math.max(game.width, game.height) * 1.35;
+
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  for (let index = 0; index < 28; index += 1) {
+    ctx.rotate((Math.PI * 2) / 28);
+    ctx.fillStyle = index % 2 === 0 ? theme.canvasRayLight : theme.canvasRayDark;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(radius, -radius * 0.07);
+    ctx.lineTo(radius, radius * 0.07);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.fillStyle = theme.canvasLine;
+  for (let y = -((game.cameraY * 0.25) % 80); y < game.height; y += 80) {
+    ctx.fillRect(0, y, game.width, 2);
+  }
+}
+
+function drawCoverImage(image, x, y, width, height) {
+  const imageWidth = image.naturalWidth || image.width;
+  const imageHeight = image.naturalHeight || image.height;
+
+  if (!imageWidth || !imageHeight) {
+    return;
+  }
+
+  const scale = Math.max(width / imageWidth, height / imageHeight);
+  const drawWidth = imageWidth * scale;
+  const drawHeight = imageHeight * scale;
+  const drawX = x + (width - drawWidth) / 2;
+  const drawY = y + (height - drawHeight) / 2;
+
+  ctx.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+}
+
+function drawBackgroundAds() {
+  if (!game.backgroundAds || !game.backgroundAds.length) {
+    return;
+  }
+
+  game.backgroundAds.forEach((ad) => {
+    const screenY = ad.y - game.cameraY;
+
+    if (screenY < -ad.height - 80 || screenY > game.height + ad.height + 80) {
+      return;
+    }
+
+    ctx.save();
+    ctx.globalAlpha = ad.alpha;
+    ctx.translate(ad.x + ad.width / 2, screenY + ad.height / 2);
+    ctx.rotate(ad.rotation);
+    ctx.fillStyle = "rgba(6, 27, 66, 0.26)";
+    roundRect(-ad.width / 2 + 5, -ad.height / 2 + 8, ad.width, ad.height, 12);
+    ctx.fill();
+    ctx.drawImage(ad.image, -ad.width / 2, -ad.height / 2, ad.width, ad.height);
+    ctx.restore();
+  });
+}
+
+function drawPlatforms() {
+  game.platforms.forEach((platform) => {
+    if (platform.touched) {
+      return;
+    }
+
+    const screenY = platform.y - game.cameraY;
+
+    if (screenY < -60 || screenY > game.height + 60) {
+      return;
+    }
+
+    ctx.fillStyle = "rgba(86, 139, 25, 0.32)";
+    roundRect(platform.x + 3, screenY + 7, platform.width, platform.height, 8);
+    ctx.fill();
+
+    ctx.fillStyle = getPlatformColor(platform.type);
+    roundRect(platform.x, screenY, platform.width, platform.height, 7);
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    if (platform.type === "moving") {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "11px 'Arial Black', 'Trebuchet MS', Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("↔", platform.x + platform.width / 2, screenY + platform.height / 2 + 1);
+    }
+
+    if (platform.type === "touch") {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "10px 'Arial Black', 'Trebuchet MS', Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("1", platform.x + platform.width / 2, screenY + platform.height / 2 + 1);
+    }
+
+    if (platform.bouncePad) {
+      ctx.fillStyle = "#ff5f6d";
+      roundRect(platform.x + platform.width / 2 - 14, screenY - 13, 28, 18, 8);
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+
+    if (platform.coin && !platform.coinCollected) {
+      ctx.fillStyle = "#f5c542";
+      ctx.beginPath();
+      ctx.arc(platform.x + platform.width / 2, screenY - 24, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = "#3d2700";
+      ctx.fillRect(platform.x + platform.width / 2 - 2, screenY - 30, 4, 12);
+    }
+
+    if (platform.powerup && !platform.powerupCollected) {
+      drawPowerup(platform, screenY);
+    }
+  });
+}
+
+function getPlatformColor(type) {
+  if (type === "small") {
+    return "#9be23f";
+  }
+
+  if (type === "large") {
+    return "#f5ce90";
+  }
+
+  if (type === "moving") {
+    return "#5bc8ff";
+  }
+
+  if (type === "touch") {
+    return "#ffb637";
+  }
+
+  return "#fff1c9";
+}
+
+function drawPowerup(platform, screenY) {
+  const powerup = powerupById[platform.powerup];
+
+  if (!powerup) {
+    return;
+  }
+
+  const x = platform.x + platform.width / 2;
+  const y = screenY - 48;
+
+  ctx.fillStyle = "rgba(86, 139, 25, 0.28)";
+  ctx.beginPath();
+  ctx.arc(x + 2, y + 5, 18, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#fff1c9";
+  ctx.beginPath();
+  ctx.arc(x, y, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 4;
+  ctx.stroke();
+
+  ctx.font = "24px 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(powerup.emoji, x, y + 1);
+}
+
+function drawPlayer() {
+  const player = game.player;
+  const character = getCharacter(saveState.equippedCharacter);
+  const image = characterImages[character.id];
+  const x = player.x + player.width / 2;
+  const y = player.y - game.cameraY + player.height / 2;
+
+  if (image && image.complete && image.naturalWidth > 0) {
+    ctx.fillStyle = "rgba(86, 139, 25, 0.26)";
+    ctx.beginPath();
+    ctx.arc(x + 3, y + 7, player.width * 0.52, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(x, y, player.width * 0.54, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.drawImage(image, player.x, player.y - game.cameraY, player.width, player.height);
+    return;
+  }
+
+  ctx.fillStyle = character.ring;
+  ctx.beginPath();
+  ctx.arc(x, y, 24, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = character.fill;
+  ctx.beginPath();
+  ctx.arc(x, y, 20, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = character.face;
+  ctx.beginPath();
+  ctx.arc(x - 7, y - 4, 3, 0, Math.PI * 2);
+  ctx.arc(x + 7, y - 4, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = character.face;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(x, y + 3, 8, 0.15 * Math.PI, 0.85 * Math.PI);
+  ctx.stroke();
+}
+
+function drawOpponentGhost() {
+  if (!game.onlineDuel || !multiplayer.opponent || Date.now() - multiplayer.opponent.updatedAt > MULTIPLAYER_GHOST_STALE_MS) {
+    return;
+  }
+
+  const opponent = multiplayer.opponent;
+  const character = getCharacter(opponent.characterId);
+  const image = characterImages[character.id];
+  const size = opponent.size || 48;
+  const centerX = opponent.xRatio * game.width;
+  const worldY = game.startY + opponent.yOffset;
+  const screenY = worldY - game.cameraY;
+  const drawX = centerX - size / 2;
+
+  if (screenY < -120 || screenY > game.height + 120) {
+    return;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = 0.52;
+
+  if (image && image.complete && image.naturalWidth > 0) {
+    ctx.fillStyle = "rgba(255, 255, 255, 0.34)";
+    ctx.beginPath();
+    ctx.arc(centerX, screenY + size / 2, size * 0.58, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.drawImage(image, drawX, screenY, size, size);
+  } else {
+    ctx.fillStyle = character.ring;
+    ctx.beginPath();
+    ctx.arc(centerX, screenY + size / 2, size * 0.54, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = character.fill;
+    ctx.beginPath();
+    ctx.arc(centerX, screenY + size / 2, size * 0.44, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(245, 206, 144, 0.94)";
+  roundRect(centerX - 62, screenY - 30, 124, 24, 12);
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = "#8d642f";
+  ctx.font = "11px 'Arial Black', 'Trebuchet MS', Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(`${opponent.name} ${opponent.score}`, centerX, screenY - 18);
+  ctx.restore();
+}
+
+function drawParticles() {
+  game.particles.forEach((particle) => {
+    ctx.globalAlpha = Math.max(0, particle.life / 0.32);
+    ctx.fillStyle = particle.color;
+    ctx.fillRect(particle.x - 3, particle.y - game.cameraY - 3, 6, 6);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function roundRect(x, y, width, height, radius) {
+  const safeRadius = Math.min(radius, width / 2, height / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + safeRadius, y);
+  ctx.lineTo(x + width - safeRadius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  ctx.lineTo(x + width, y + height - safeRadius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  ctx.lineTo(x + safeRadius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  ctx.lineTo(x, y + safeRadius);
+  ctx.quadraticCurveTo(x, y, x + safeRadius, y);
+  ctx.closePath();
+}
+
+function handleKeyboardInput(event, isPressed) {
+  if (event.target && (event.target.tagName === "INPUT" || event.target.tagName === "TEXTAREA")) {
+    return;
+  }
+
+  if (event.key === "Escape" && !leaderboardToast.classList.contains("hidden")) {
+    hideLeaderboardToast();
+    event.preventDefault();
+    return;
+  }
+
+  if ((event.key === "p" || event.key === "P") && isPressed && !event.repeat) {
+    togglePause();
+    event.preventDefault();
+    return;
+  }
+
+  if (event.key === "a" || event.key === "A" || event.key === "ArrowLeft") {
+    if (game && game.paused) {
+      event.preventDefault();
+      return;
+    }
+
+    input.left = isPressed;
+    event.preventDefault();
+  }
+
+  if (event.key === "d" || event.key === "D" || event.key === "ArrowRight") {
+    if (game && game.paused) {
+      event.preventDefault();
+      return;
+    }
+
+    input.right = isPressed;
+    event.preventDefault();
+  }
+}
+
+function handleTouchInput(event) {
+  if (!gameScreen.classList.contains("active")) {
+    return;
+  }
+
+  setTouchDirection(event.touches);
+  event.preventDefault();
+}
+
+function shouldIgnoreGameTouch(event) {
+  return Boolean(event.target.closest("button, label, input"));
+}
+
+function setTouchDirection(touches) {
+  input.touchLeft = false;
+  input.touchRight = false;
+
+  const rect = gameFrame.getBoundingClientRect();
+  const midpoint = rect.left + rect.width / 2;
+
+  Array.from(touches).forEach((touch) => {
+    if (touch.clientX < midpoint) {
+      input.touchLeft = true;
+    } else {
+      input.touchRight = true;
+    }
+  });
+}
+
+let swipeStartX = 0;
+let swipeStartY = 0;
+
+function handleSwipeInput(event) {
+  if (!gameScreen.classList.contains("active")) {
+    return;
+  }
+
+  const touch = event.changedTouches[0];
+  const dx = touch.clientX - swipeStartX;
+  const dy = touch.clientY - swipeStartY;
+
+  if (Math.abs(dx) > 35 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+    const direction = dx > 0 ? 1 : -1;
+    input.swipeBoost = direction * 1.35;
+
+    if (game && game.running && !game.countdownActive) {
+      const impulse = Math.min(280, 130 + Math.abs(dx) * 2.1) * getControlSensitivity();
+      game.player.vx += direction * impulse;
+    }
+  }
+}
+
+function handleGamepadInput() {
+  const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let connected = false;
+  let axisX = 0;
+
+  for (const pad of gamepads) {
+    if (!pad) {
+      continue;
+    }
+
+    connected = true;
+    const stickX = Math.abs(pad.axes[0] || 0) > 0.18 ? pad.axes[0] : 0;
+    const dpadLeft = pad.buttons[14] && pad.buttons[14].pressed;
+    const dpadRight = pad.buttons[15] && pad.buttons[15].pressed;
+    axisX = stickX;
+
+    if (dpadLeft) {
+      axisX = -1;
+    }
+
+    if (dpadRight) {
+      axisX = 1;
+    }
+
+    break;
+  }
+
+  input.gamepadX = axisX;
+  gamepadStatus.classList.toggle("visible", connected && saveState.settings.showGamepadStatus);
+}
+
+window.addEventListener("keydown", (event) => handleKeyboardInput(event, true));
+window.addEventListener("keyup", (event) => handleKeyboardInput(event, false));
+
+gameFrame.addEventListener("touchstart", (event) => {
+  if (shouldIgnoreGameTouch(event)) {
+    return;
+  }
+
+  if (event.changedTouches.length > 0) {
+    swipeStartX = event.changedTouches[0].clientX;
+    swipeStartY = event.changedTouches[0].clientY;
+  }
+  handleTouchInput(event);
+}, { passive: false });
+
+gameFrame.addEventListener("touchmove", (event) => {
+  if (shouldIgnoreGameTouch(event)) {
+    return;
+  }
+
+  handleTouchInput(event);
+}, { passive: false });
+gameFrame.addEventListener("touchend", (event) => {
+  if (shouldIgnoreGameTouch(event)) {
+    return;
+  }
+
+  handleSwipeInput(event);
+  setTouchDirection(event.touches);
+  event.preventDefault();
+}, { passive: false });
+
+gameFrame.addEventListener("touchcancel", () => {
+  input.touchLeft = false;
+  input.touchRight = false;
+});
+
+window.addEventListener("gamepadconnected", () => {
+  if (saveState.settings.showGamepadStatus) {
+    gamepadStatus.classList.add("visible");
+  }
+});
+
+window.addEventListener("gamepaddisconnected", () => {
+  input.gamepadX = 0;
+  gamepadStatus.classList.remove("visible");
+});
+
+window.addEventListener("resize", () => {
+  resizeCanvas();
+});
+
+window.addEventListener("online", () => {
+  schedulePendingLeaderboardRetry(500);
+});
+
+window.addEventListener("beforeunload", () => {
+  stopAdminLiveRouting();
+  leaveMultiplayerRoom(true);
+});
+
+if (MULTIPLAYER_LOCKED) {
+  multiplayerButton.disabled = true;
+  multiplayerButton.setAttribute("aria-disabled", "true");
+}
+
+playButton.addEventListener("click", () => startGame("classic"));
+gameModesButton.addEventListener("click", showGameModes);
+multiplayerButton.addEventListener("click", showMultiplayer);
+createRoomButton.addEventListener("click", createMultiplayerRoom);
+joinRoomButton.addEventListener("click", joinMultiplayerRoomFromInput);
+copyRoomCodeButton.addEventListener("click", copyMultiplayerRoomCode);
+multiplayerReadyButton.addEventListener("click", toggleMultiplayerReady);
+multiplayerLeaveButton.addEventListener("click", () => {
+  leaveMultiplayerRoom(true);
+  renderMultiplayerScreen();
+});
+storeButton.addEventListener("click", showStore);
+characterButton.addEventListener("click", showCharacterSelect);
+controlsButton.addEventListener("click", showControls);
+storeBackButton.addEventListener("click", showMenu);
+characterBackButton.addEventListener("click", showMenu);
+controlsBackButton.addEventListener("click", showMenu);
+multiplayerBackButton.addEventListener("click", () => {
+  leaveMultiplayerRoom(true);
+  showMenu();
+});
+modeBackButton.addEventListener("click", showMenu);
+restartButton.addEventListener("click", () => {
+  if (game && game.onlineDuel) {
+    resetMultiplayerLobby(true);
+    return;
+  }
+
+  startGame(game ? game.mode : "classic");
+});
+mainMenuButton.addEventListener("click", () => {
+  if (game && game.onlineDuel) {
+    leaveMultiplayerRoom(true);
+  }
+
+  showMenu();
+});
+pauseResumeButton.addEventListener("click", () => setPaused(false));
+pauseEndButton.addEventListener("click", () => endGame("paused"));
+redeemButton.addEventListener("click", redeemCode);
+leaderboardButton.addEventListener("click", showLeaderboardToast);
+leaderboardRefreshButton.addEventListener("click", () => {
+  leaderboardType = leaderboardType === "classic" ? "multiplayer" : "classic";
+  if (leaderboardType === "classic") {
+    loadLeaderboard();
+  } else {
+    loadMultiplayerLeaderboard();
+  }
+  updateLeaderboardTabDisplay();
+});
+leaderboardCloseButton.addEventListener("click", hideLeaderboardToast);
+leaderboardToast.addEventListener("click", (event) => {
+  if (event.target === leaderboardToast) {
+    hideLeaderboardToast();
+  }
+});
+submitScoreButton.addEventListener("click", () => submitLeaderboardScore());
+particlesToggle.addEventListener("change", () => setParticlesEnabled(particlesToggle.checked));
+gamepadBadgeToggle.addEventListener("change", () => setGamepadBadgeEnabled(gamepadBadgeToggle.checked));
+sensitivitySlider.addEventListener("input", () => setSensitivity(sensitivitySlider.value));
+settingsLeaderboardNameButton.addEventListener("click", updateSettingsLeaderboardName);
+settingsLeaderboardNameInput.addEventListener("input", () => {
+  const cleaned = sanitizeLeaderboardName(settingsLeaderboardNameInput.value);
+
+  if (settingsLeaderboardNameInput.value !== cleaned) {
+    settingsLeaderboardNameInput.value = cleaned;
+  }
+});
+authNameInput.addEventListener("input", () => {
+  const cleaned = sanitizeLeaderboardName(authNameInput.value);
+
+  if (authNameInput.value !== cleaned) {
+    authNameInput.value = cleaned;
+  }
+});
+settingsLeaderboardNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    updateSettingsLeaderboardName();
+  }
+});
+authOpenButton.addEventListener("click", showAuthOverlay);
+authCloseButton.addEventListener("click", hideAuthOverlay);
+authOverlay.addEventListener("click", (event) => {
+  if (event.target === authOverlay) {
+    hideAuthOverlay();
+  }
+});
+authSignInButton.addEventListener("click", signInAccount);
+authSignUpButton.addEventListener("click", signUpAccount);
+authSignOutButton.addEventListener("click", signOutAccount);
+authPasswordInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    signInAccount();
+  }
+});
+authNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    signUpAccount();
+  }
+});
+backgroundUploadInput.addEventListener("change", () => {
+  setCustomBackgroundFromFile(backgroundUploadInput.files[0]).finally(() => {
+    backgroundUploadInput.value = "";
+  });
+});
+clearBackgroundButton.addEventListener("click", clearCustomBackground);
+redeemInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    redeemCode();
+  }
+});
+joinRoomInput.addEventListener("input", () => {
+  const cleaned = sanitizeRoomCode(joinRoomInput.value);
+
+  if (joinRoomInput.value !== cleaned) {
+    joinRoomInput.value = cleaned;
+  }
+});
+joinRoomInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    joinMultiplayerRoomFromInput();
+  }
+});
+leaderboardNameInput.addEventListener("input", () => {
+  const cleaned = sanitizeLeaderboardName(leaderboardNameInput.value);
+
+  if (leaderboardNameInput.value !== cleaned) {
+    leaderboardNameInput.value = cleaned;
+  }
+});
+leaderboardNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    submitLeaderboardScore();
+  }
+});
+
+loadCharacterImages();
+loadBackgroundAdImages();
+loadData();
+initAuth();
+showMenu();
+
 // ============================================
 // MULTIPLAYER LEADERBOARD
 // ============================================
 
 function updateLeaderboardTabDisplay() {
   const isMultiplayer = leaderboardType === "multiplayer";
-  leaderboardTitle.textContent = isMultiplayer ? "Multiplayer Rankings" : "Leaderboard";
+  if (leaderboardTitle) {
+    leaderboardTitle.textContent = isMultiplayer ? "Multiplayer Rankings" : "Leaderboard";
+  }
   leaderboardRefreshButton.textContent = isMultiplayer ? "Switch to Classic" : "Switch to Multiplayer";
 }
 
@@ -3327,7 +5433,9 @@ function renderMultiplayerLeaderboard(players) {
     const playerName = document.createElement("strong");
     const meta = document.createElement("span");
     const stats = document.createElement("strong");
-    const character = getCharacter(entry.character_id);
+    const character = getCharacterId(entry.character_id)
+      ? CHARACTERS.find((c) => c.id === entry.character_id) || CHARACTERS[0]
+      : CHARACTERS[0];
 
     rank.className = "leaderboard-rank";
     rank.textContent = `#${index + 1}`;
@@ -3344,7 +5452,6 @@ function renderMultiplayerLeaderboard(players) {
   });
 }
 
-// Start the application
-init();
+
 
 })();
