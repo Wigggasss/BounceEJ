@@ -372,6 +372,7 @@ const authOpenButton = document.getElementById("authOpenButton");
 const authOverlay = document.getElementById("authOverlay");
 const authCloseButton = document.getElementById("authCloseButton");
 const authAccountSummary = document.getElementById("authAccountSummary");
+const authForm = document.getElementById("authForm");
 const authEmailInput = document.getElementById("authEmailInput");
 const authPasswordInput = document.getElementById("authPasswordInput");
 const authNameInput = document.getElementById("authNameInput");
@@ -563,13 +564,18 @@ function saveData() {
 }
 
 function createLeaderboardClient() {
+  if (window.supabaseClient) {
+    return window.supabaseClient;
+  }
+
   const config = window.BOUNCE_EJ_SUPABASE;
 
   if (!window.supabase || !config || !config.url || !config.publishableKey) {
     return null;
   }
 
-  return window.supabase.createClient(config.url, config.publishableKey);
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+  return window.supabaseClient;
 }
 
 function initAuth() {
@@ -5500,6 +5506,9 @@ authOverlay.addEventListener("click", (event) => {
   if (event.target === authOverlay) {
     hideAuthOverlay();
   }
+});
+authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
 });
 authSignInButton.addEventListener("click", signInAccount);
 authSignUpButton.addEventListener("click", signUpAccount);
