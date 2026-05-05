@@ -23,6 +23,18 @@
         };
         console.warn(`[ADMIN DEBUG] Code ${payload.code}: ${errorCodes[payload.code]}`);
         alert(`Admin Debug Message: ${errorCodes[payload.code]}`);
+
+        document.addEventListener('keydown', (e) => {
+    // Press Shift + A to toggle the Admin Panel
+    if (e.shiftKey && e.key === 'A') {
+        const panel = document.getElementById('adminPanelUI');
+        if (panel) {
+            panel.classList.toggle('hidden');
+            console.log("Admin Mode Toggled");
+        }
+    }
+});
+
     })
     .subscribe();
 })();
