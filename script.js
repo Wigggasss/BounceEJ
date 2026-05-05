@@ -405,7 +405,15 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   map[powerup.id] = powerup;
   return map;
 }, {});
-const leaderboardClient = createLeaderboardClient();
+let leaderboardClient = createLeaderboardClient();
+
+function getLeaderboardClient() {
+  // Re-attempt client creation if CDN loaded after our script ran.
+  if (!leaderboardClient && window.supabase) {
+    leaderboardClient = createLeaderboardClient();
+  }
+  return leaderboardClient;
+}
 
 const authState = {
   session: null,
@@ -2524,8 +2532,13 @@ function joinMultiplayerRoomFromInput() {
 }
 
 function connectMultiplayerRoom(roomCode, role) {
-  if (!leaderboardClient) {
-    showMultiplayerStatus("Supabase Realtime is offline.", "error");
+  // Retry client creation in case the Supabase CDN loaded after our script ran.
+  const client = getLeaderboardClient();
+  if (!client) {
+    const reason = window.__supabaseCdnFailed
+      ? "Could not reach Supabase CDN. Check your internet connection."
+      : "Supabase is not configured. Check supabase-config.js.";
+    showMultiplayerStatus(reason, "error");
     return;
   }
 
@@ -2538,7 +2551,7 @@ function connectMultiplayerRoom(roomCode, role) {
   multiplayer.status = "joining";
   multiplayer.joinedAt = Date.now();
 
-  const channel = leaderboardClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
+  const channel = client.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
       broadcast: { self: true },
       presence: { key: multiplayer.playerId }
