@@ -1,8 +1,4 @@
 (function() {
-    const supabase = window.supabase.createClient(
-        window.BOUNCE_EJ_SUPABASE.url, 
-        window.BOUNCE_EJ_SUPABASE.publishableKey
-    );
 
     // This must match the channel in your admin.html
     const admin = supabase.channel('admin_control');
