@@ -72,23 +72,31 @@
     </div>
 </div>
 
+<!-- FIXED: Correct Supabase SDK link -->
 <script src="https://jsdelivr.net"></script>
 <script>
-    const supabase = window.supabase.createClient(
-         "https://imhorwdmvhguvsayleqr.supabase.co", 
+    // Initialize Supabase
+    const supabaseClient = supabase.createClient(
+        "https://imhorwdmvhguvsayleqr.supabase.co", 
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltaG9yd2RtdmhndXZzYXlsZXFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2NTQ4MjMsImV4cCI6MjA5MzIzMDgyM30.r0rKsHkIAQ8GrUPCY0rYS1z-8rT7fTGDRJfWU6RSNWM"
     );
-    const channel = supabase.channel('admin_control').subscribe();
+    
+    // Subscribe to the admin channel
+    const channel = supabaseClient.channel('admin_control');
+    channel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+            console.log("Admin Panel connected to Supabase!");
+        }
+    });
 
     function sendCmd(isLocked) {
+        const id = document.getElementById('targetId').value;
+        const text = document.getElementById('targetText').value;
+        
         channel.send({
             type: 'broadcast',
             event: 'remote_lock',
-            payload: { 
-                id: document.getElementById('targetId').value, 
-                locked: isLocked, 
-                text: document.getElementById('targetText').value 
-            }
+            payload: { id, locked: isLocked, text }
         });
     }
 
