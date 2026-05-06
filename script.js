@@ -2820,11 +2820,22 @@ function handleMultiplayerPresenceLeave({ leftPresences }) {
 
   const opponentLeft = (leftPresences || []).some((presence) => presence.playerId && presence.playerId !== multiplayer.playerId);
 
-  // Presence leave is a soft hint — network blips regularly cause false leaves.
-  // Only start the grace timer if we haven't already, and let
-  // checkMultiplayerDisconnect (driven by state-tick silence) be the real judge.
-  if (opponentLeft && !multiplayer.opponentLeftAt) {
-    multiplayer.opponentLeftAt = Date.now();
+  if (!opponentLeft || multiplayer.opponentLeftAt) {
+    return;
+  }
+
+  // Presence leave fires false positives during game startup — Supabase fires
+  // them whenever track() updates propagate. Only treat it as meaningful if:
+  //   1. We are past the 5-second startup grace window, AND
+  //   2. We have already received at least one real state-tick from the opponent.
+  // Otherwise, let checkMultiplayerDisconnect (state-tick silence) be the judge.
+  const now = Date.now();
+  const STARTUP_GRACE_MS = 5000;
+  const pastStartupGrace = multiplayer.matchStartedAt && (now - multiplayer.matchStartedAt) >= STARTUP_GRACE_MS;
+  const hasSeenStateTick = multiplayer.lastOpponentStateAt > (multiplayer.matchStartedAt || 0);
+
+  if (pastStartupGrace && hasSeenStateTick) {
+    multiplayer.opponentLeftAt = now;
   }
 }
 
