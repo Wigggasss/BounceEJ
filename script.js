@@ -372,10 +372,10 @@ const authOpenButton = document.getElementById("authOpenButton");
 const authOverlay = document.getElementById("authOverlay");
 const authCloseButton = document.getElementById("authCloseButton");
 const authAccountSummary = document.getElementById("authAccountSummary");
-const authForm = document.getElementById("authForm");
 const authEmailInput = document.getElementById("authEmailInput");
 const authPasswordInput = document.getElementById("authPasswordInput");
 const authNameInput = document.getElementById("authNameInput");
+const authForm = document.getElementById("authForm");
 const authSignInButton = document.getElementById("authSignInButton");
 const authSignUpButton = document.getElementById("authSignUpButton");
 const authSignOutButton = document.getElementById("authSignOutButton");
@@ -2708,13 +2708,12 @@ function syncMultiplayerPresence() {
     return;
   }
 
-  // During an active match, presence state is unreliable — brief reconnects or
-  // Supabase sync delays can make the opponent look absent for a moment even
-  // though they're still connected.  State-ticks (receiveMultiplayerStateTick)
-  // are the authoritative liveness signal while the game is running; only
-  // update the lobby players list from presence when we're not yet playing.
   if (game && game.onlineDuel && multiplayer.status === "playing") {
-    // Still keep matchHadOpponent / matchOpponentId current so getOtherMultiplayerPlayerId works.
+    // During an active match, presence state is unreliable — brief reconnects or
+    // Supabase sync delays can make the opponent look absent for a moment even
+    // though they're still connected. State-ticks (receiveMultiplayerStateTick)
+    // are the authoritative liveness signal while the game is running; only
+    // update the lobby players list from presence when we're not yet playing.
     const opponentInPresence = acceptedPlayers.find((player) => player.playerId !== multiplayer.playerId);
     if (opponentInPresence) {
       multiplayer.matchHadOpponent = true;
@@ -2729,6 +2728,17 @@ function syncMultiplayerPresence() {
 
   const hadOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
   multiplayer.players = acceptedPlayers;
+
+  if (!game || !game.onlineDuel) {
+    renderMultiplayerScreen();
+    maybeStartMultiplayerMatch();
+    return;
+  }
+
+  const hasOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
+  if (!hasOpponent && hadOpponent && !multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = Date.now();
+  }
 
   renderMultiplayerScreen();
   maybeStartMultiplayerMatch();
@@ -3316,7 +3326,7 @@ function finishMultiplayerMatch(result) {
     return;
   }
 
-  // The host is the single authority on match results.  If the guest has already
+  // The host is the single authority on match results. If the guest has already
   // set a local result (e.g. from a race-condition fallback) but the host's
   // broadcast now arrives with a different verdict, the host result wins.
   const isHostBroadcast = result._fromHost === true;
