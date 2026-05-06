@@ -574,7 +574,13 @@ function createLeaderboardClient() {
     return null;
   }
 
-  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey, {
+    realtime: {
+      params: {
+        eventsPerSecond: 40
+      }
+    }
+  });
   return window.supabaseClient;
 }
 
@@ -2559,7 +2565,10 @@ function connectMultiplayerRoom(roomCode, role) {
 
   const channel = client.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
-      broadcast: { self: true },
+      // ack: true makes broadcast wait for server acknowledgement before resolving,
+      // matching the article's RealtimeChannelConfig(ack: true) recommendation.
+      // This prevents silent message drops under load.
+      broadcast: { self: true, ack: true },
       presence: { key: multiplayer.playerId }
     }
   });
@@ -2900,9 +2909,9 @@ function handleMultiplayerBroadcast(eventName, payload) {
   }
 }
 
-function sendMultiplayerBroadcast(eventName, payload = {}) {
+async function sendMultiplayerBroadcast(eventName, payload = {}) {
   if (!multiplayer.channel) {
-    return Promise.resolve("offline");
+    return "offline";
   }
 
   // During active gameplay, attempt state_tick sends even if subscribed briefly
@@ -2910,19 +2919,46 @@ function sendMultiplayerBroadcast(eventName, payload = {}) {
   // a confirmed subscription so we don't spam before the room is ready.
   const isStateTick = eventName === "state_tick";
   if (!multiplayer.subscribed && !isStateTick) {
-    return Promise.resolve("offline");
+    return "offline";
   }
 
-  return multiplayer.channel.send({
-    type: "broadcast",
-    event: eventName,
-    payload: {
-      ...payload,
-      roomCode: multiplayer.roomCode,
-      senderId: multiplayer.playerId,
-      sentAt: Date.now()
+  const fullPayload = {
+    ...payload,
+    roomCode: multiplayer.roomCode,
+    senderId: multiplayer.playerId,
+    sentAt: Date.now()
+  };
+
+  // Retry loop matching the article's pattern: if Supabase rate-limits the send,
+  // wait one animation frame and retry. Cap at 3 attempts to avoid spinning forever.
+  // State ticks are low-priority so skip retry for them — just drop and wait for next tick.
+  const maxRetries = isStateTick ? 1 : 3;
+  let attempts = 0;
+  let response;
+
+  do {
+    try {
+      response = await multiplayer.channel.send({
+        type: "broadcast",
+        event: eventName,
+        payload: fullPayload
+      });
+    } catch {
+      response = "error";
     }
-  }).catch(() => "error");
+
+    attempts++;
+
+    if (response === "rate limited" || response === "error") {
+      // Wait one frame before retrying, same as article's Future.delayed(Duration.zero)
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  } while (
+    (response === "rate limited") &&
+    attempts < maxRetries
+  );
+
+  return response;
 }
 
 function toggleMultiplayerReady() {
