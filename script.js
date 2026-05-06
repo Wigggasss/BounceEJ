@@ -25,7 +25,7 @@ const MULTIPLAYER_MAX_PLAYERS = 2;
 const MULTIPLAYER_STATE_INTERVAL = 0.1;
 const MULTIPLAYER_PRESENCE_INTERVAL = 0.75;
 const MULTIPLAYER_DISCONNECT_LIMIT = 15;
-const MULTIPLAYER_PRESENCE_LEAVE_GRACE = 1.5;
+const MULTIPLAYER_PRESENCE_LEAVE_GRACE = 8;
 const MULTIPLAYER_SIMULTANEOUS_WINDOW = 500;
 const MULTIPLAYER_GHOST_STALE_MS = 8000;
 const MULTIPLAYER_ROOM_CODE_LENGTH = 5;
@@ -2568,6 +2568,7 @@ function connectMultiplayerRoom(roomCode, role) {
 
   channel
     .on("presence", { event: "sync" }, syncMultiplayerPresence)
+    .on("presence", { event: "join" }, handleMultiplayerPresenceJoin)
     .on("presence", { event: "leave" }, handleMultiplayerPresenceLeave);
 
   ["room_seed", "ready_update", "start_match", "state_tick", "player_dead", "match_result", "rematch_request", "leave_match"].forEach((eventName) => {
@@ -2707,22 +2708,27 @@ function syncMultiplayerPresence() {
     return;
   }
 
+  // During an active match, presence state is unreliable — brief reconnects or
+  // Supabase sync delays can make the opponent look absent for a moment even
+  // though they're still connected.  State-ticks (receiveMultiplayerStateTick)
+  // are the authoritative liveness signal while the game is running; only
+  // update the lobby players list from presence when we're not yet playing.
+  if (game && game.onlineDuel && multiplayer.status === "playing") {
+    // Still keep matchHadOpponent / matchOpponentId current so getOtherMultiplayerPlayerId works.
+    const opponentInPresence = acceptedPlayers.find((player) => player.playerId !== multiplayer.playerId);
+    if (opponentInPresence) {
+      multiplayer.matchHadOpponent = true;
+      multiplayer.matchOpponentId = opponentInPresence.playerId;
+      // Opponent is back — clear any leave grace timer so the match continues.
+      multiplayer.opponentLeftAt = 0;
+    }
+    // Do NOT set opponentLeftAt here based on absence; let handleMultiplayerPresenceLeave
+    // and checkMultiplayerDisconnect (driven by state-tick timing) handle that.
+    return;
+  }
+
   const hadOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
   multiplayer.players = acceptedPlayers;
-  const hasOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
-
-  if (game && game.onlineDuel && multiplayer.status === "playing") {
-    const opponent = multiplayer.players.find((player) => player.playerId !== multiplayer.playerId);
-
-    if (opponent) {
-      multiplayer.matchHadOpponent = true;
-      multiplayer.matchOpponentId = opponent.playerId;
-      multiplayer.opponentLeftAt = 0;
-      updateOpponentSnapshot(opponent);
-    } else if (hadOpponent && !multiplayer.opponentLeftAt) {
-      multiplayer.opponentLeftAt = Date.now();
-    }
-  }
 
   renderMultiplayerScreen();
   maybeStartMultiplayerMatch();
@@ -2795,6 +2801,18 @@ function getAcceptedMultiplayerPlayers(players) {
   return (host ? [host, ...guests] : guests).slice(0, MULTIPLAYER_MAX_PLAYERS);
 }
 
+function handleMultiplayerPresenceJoin({ newPresences }) {
+  // When the opponent rejoins presence (e.g. after a brief network blip), clear
+  // any pending leave timer so the match is not incorrectly ended.
+  const opponentRejoined = (newPresences || []).some(
+    (presence) => presence.playerId && presence.playerId !== multiplayer.playerId
+  );
+
+  if (opponentRejoined && multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = 0;
+  }
+}
+
 function handleMultiplayerPresenceLeave({ leftPresences }) {
   if (!game || !game.onlineDuel || multiplayer.status !== "playing") {
     return;
@@ -2802,6 +2820,9 @@ function handleMultiplayerPresenceLeave({ leftPresences }) {
 
   const opponentLeft = (leftPresences || []).some((presence) => presence.playerId && presence.playerId !== multiplayer.playerId);
 
+  // Presence leave is a soft hint — network blips regularly cause false leaves.
+  // Only start the grace timer if we haven't already, and let
+  // checkMultiplayerDisconnect (driven by state-tick silence) be the real judge.
   if (opponentLeft && !multiplayer.opponentLeftAt) {
     multiplayer.opponentLeftAt = Date.now();
   }
@@ -3182,8 +3203,9 @@ function resolveMultiplayerResult() {
 
   if (multiplayer.isHost) {
     // Host is the single authority: broadcast the result then apply it locally.
-    sendMultiplayerBroadcast("match_result", result);
-    finishMultiplayerMatch(result);
+    const broadcastResult = Object.assign({}, result, { _fromHost: true });
+    sendMultiplayerBroadcast("match_result", broadcastResult);
+    finishMultiplayerMatch(broadcastResult);
   } else {
     // Guest waits for the host's match_result broadcast (already handled in
     // handleMultiplayerBroadcast). Only apply locally as a last-resort fallback
@@ -3222,6 +3244,14 @@ function checkMultiplayerDisconnect() {
   }
 
   const now = Date.now();
+
+  // Never fire a disconnect in the first 5 seconds — state-ticks from the
+  // opponent may not have arrived yet right after game start.
+  const STARTUP_GRACE_S = 5;
+  if (multiplayer.matchStartedAt && (now - multiplayer.matchStartedAt) / 1000 < STARTUP_GRACE_S) {
+    return;
+  }
+
   const lastSeenAt = Math.max(multiplayer.lastOpponentStateAt || 0, multiplayer.matchStartedAt || 0);
 
   if (multiplayer.opponentLeftAt && multiplayer.lastOpponentStateAt > multiplayer.opponentLeftAt) {
@@ -3254,8 +3284,9 @@ function finishMultiplayerDisconnect() {
 
   if (multiplayer.isHost) {
     // Host is the authority on disconnect results too — broadcast then apply.
-    sendMultiplayerBroadcast("match_result", result);
-    finishMultiplayerMatch(result);
+    const broadcastResult = Object.assign({}, result, { _fromHost: true });
+    sendMultiplayerBroadcast("match_result", broadcastResult);
+    finishMultiplayerMatch(broadcastResult);
   } else {
     // Guest: give the host extra time to send a result before declaring victory ourselves.
     // If host's match_result arrives first, guestFallbackTimer is cleared and we never apply this.
@@ -3270,8 +3301,21 @@ function finishMultiplayerDisconnect() {
 }
 
 function finishMultiplayerMatch(result) {
-  if (!game || !game.onlineDuel || multiplayer.result) {
+  if (!game || !game.onlineDuel) {
     return;
+  }
+
+  // The host is the single authority on match results.  If the guest has already
+  // set a local result (e.g. from a race-condition fallback) but the host's
+  // broadcast now arrives with a different verdict, the host result wins.
+  const isHostBroadcast = result._fromHost === true;
+  if (multiplayer.result) {
+    if (!multiplayer.isHost && isHostBroadcast) {
+      // Override guest's locally-derived result with the authoritative host result.
+      multiplayer.result = null;
+    } else {
+      return;
+    }
   }
 
   multiplayer.result = result;
