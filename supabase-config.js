@@ -14,13 +14,7 @@ window.getBounceEJSupabaseClient = function getBounceEJSupabaseClient() {
     return null;
   }
 
-  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey, {
-    realtime: {
-      params: {
-        eventsPerSecond: 40
-      }
-    }
-  });
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
   return window.supabaseClient;
 };
 
