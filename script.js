@@ -25,9 +25,9 @@ const MULTIPLAYER_MAX_PLAYERS = 2;
 const MULTIPLAYER_STATE_INTERVAL = 0.2;
 const MULTIPLAYER_PRESENCE_INTERVAL = 0.75;
 const MULTIPLAYER_DISCONNECT_LIMIT = 15;
-const MULTIPLAYER_PRESENCE_LEAVE_GRACE = 1.5;
+const MULTIPLAYER_PRESENCE_LEAVE_GRACE = 8;
 const MULTIPLAYER_SIMULTANEOUS_WINDOW = 500;
-const MULTIPLAYER_GHOST_STALE_MS = 6500;
+const MULTIPLAYER_GHOST_STALE_MS = 30000;
 const MULTIPLAYER_ROOM_CODE_LENGTH = 5;
 const FALLBACK_CENSOR_WORDS = [
   "fuck",
@@ -62,7 +62,8 @@ const ANTI_CHEAT_MAX_UPWARD_STEP = 185;
 const ANTI_CHEAT_MAX_DOWNWARD_STEP = 150;
 const ANTI_CHEAT_MAX_HORIZONTAL_STEP = 150;
 const DEFAULT_CHARACTER_SECTION = "EJs";
-const CHARACTER_SECTION_ORDER = ["EJs", "Limited", "Friends"];
+const BOOST_STORE_SECTION = "Boosts";
+const CHARACTER_SECTION_ORDER = ["EJs", "Limited", "Friends", BOOST_STORE_SECTION];
 const CHARACTER_RARITIES = {
   common: {
     label: "Common",
@@ -189,6 +190,61 @@ const LEGACY_CHARACTER_IDS = {
   shadow: "portrait"
 };
 
+const DEFAULT_BOOST_INVENTORY = {};
+
+const DEFAULT_BUYABLE_POWERUPS = [
+  {
+    id: "speedboost",
+    name: "Speed Boost",
+    emoji: "⚡",
+    price: 45,
+    effect: "speed",
+    speedMultiplier: 1.28,
+    description: "Move faster for your next run.",
+    message: "Speed Boost active!"
+  },
+  {
+    id: "doublejumps",
+    name: "Double Jumps",
+    emoji: "🪽",
+    price: 55,
+    effect: "doubleJump",
+    charges: 2,
+    description: "Get two emergency mid-air jumps next round.",
+    message: "Double Jumps loaded!"
+  },
+  {
+    id: "revive",
+    name: "Revive",
+    emoji: "❤️",
+    price: 80,
+    effect: "revive",
+    revives: 1,
+    description: "Save yourself from one fall in the next run.",
+    message: "Revive ready!"
+  },
+  {
+    id: "jumpboost",
+    name: "Jump Boost",
+    emoji: "🚀",
+    price: 50,
+    effect: "jump",
+    jumpMultiplier: 1.16,
+    description: "Bounce higher for one round.",
+    message: "Jump Boost active!"
+  },
+  {
+    id: "slowfalling",
+    name: "Slow Falling",
+    emoji: "🪂",
+    price: 50,
+    effect: "slowFall",
+    gravityMultiplier: 0.72,
+    description: "Fall slower for one round.",
+    message: "Slow Falling active!"
+  }
+];
+
 const DEFAULT_POWERUPS = [
   {
     id: "burger",
@@ -304,6 +360,7 @@ const modeList = document.getElementById("modeList");
 const storeXp = document.getElementById("storeXp");
 const storeTabs = document.getElementById("storeTabs");
 const storeList = document.getElementById("storeList");
+const boostButtonList = document.getElementById("boostButtonList");
 const characterList = document.getElementById("characterList");
 const redeemInput = document.getElementById("redeemInput");
 const redeemButton = document.getElementById("redeemButton");
@@ -319,6 +376,7 @@ const hudTimer = document.getElementById("hudTimer");
 const hudXp = document.getElementById("hudXp");
 const hudPowerup = document.getElementById("hudPowerup");
 const hudPowerupMessage = document.getElementById("hudPowerupMessage");
+const doubleJumpButton = document.getElementById("doubleJumpButton");
 const gamepadStatus = document.getElementById("gamepadStatus");
 const countdownOverlay = document.getElementById("countdownOverlay");
 const countdownText = document.getElementById("countdownText");
@@ -372,6 +430,7 @@ const authOpenButton = document.getElementById("authOpenButton");
 const authOverlay = document.getElementById("authOverlay");
 const authCloseButton = document.getElementById("authCloseButton");
 const authAccountSummary = document.getElementById("authAccountSummary");
+const authForm = document.getElementById("authForm");
 const authEmailInput = document.getElementById("authEmailInput");
 const authPasswordInput = document.getElementById("authPasswordInput");
 const authNameInput = document.getElementById("authNameInput");
@@ -390,6 +449,8 @@ let saveState = {
   ownedCharacters: ["regular"],
   equippedCharacter: "regular",
   redeemedCodes: [],
+  boostInventory: { ...DEFAULT_BOOST_INVENTORY },
+  selectedBoosts: [],
   playerName: "",
   leaderboardRowId: "",
   leaderboardNameLocked: false,
@@ -400,12 +461,22 @@ let saveState = {
 const characterImages = {};
 const backgroundAdImages = [];
 const customBackgroundImage = new Image();
+const buyablePowerupDefinitions = normalizeBuyablePowerups(window.BOUNCE_EJ_BUYABLE_POWERUPS || DEFAULT_BUYABLE_POWERUPS);
+const buyablePowerupById = buyablePowerupDefinitions.reduce((map, powerup) => {
+  map[powerup.id] = powerup;
+  return map;
+}, {});
 const powerupDefinitions = normalizePowerups(window.BOUNCE_EJ_POWERUPS || DEFAULT_POWERUPS);
 const powerupById = powerupDefinitions.reduce((map, powerup) => {
   map[powerup.id] = powerup;
   return map;
 }, {});
-const leaderboardClient = createLeaderboardClient();
+let leaderboardClient = createLeaderboardClient();
+
+function getLeaderboardClient() {
+  // Re-attempt client creation if the deferred Supabase loader finished after script startup.
+  return leaderboardClient || refreshLeaderboardClient();
+}
 
 const authState = {
   session: null,
@@ -469,6 +540,8 @@ function loadData() {
             ownedCharacters: ["regular"],
             equippedCharacter: "regular",
             redeemedCodes: [],
+            boostInventory: { ...DEFAULT_BOOST_INVENTORY },
+            selectedBoosts: [],
             playerName: typeof parsed.playerName === "string" ? parsed.playerName : "",
             leaderboardRowId: "",
             leaderboardNameLocked: typeof parsed.leaderboardNameLocked === "boolean" ? parsed.leaderboardNameLocked : Boolean(parsed.playerName),
@@ -484,6 +557,8 @@ function loadData() {
             ownedCharacters: Array.isArray(parsed.ownedCharacters) ? parsed.ownedCharacters : ["regular"],
             equippedCharacter: typeof parsed.equippedCharacter === "string" ? parsed.equippedCharacter : "regular",
             redeemedCodes: Array.isArray(parsed.redeemedCodes) ? parsed.redeemedCodes : [],
+            boostInventory: normalizeBoostInventory(parsed.boostInventory),
+            selectedBoosts: normalizeSelectedBoosts(parsed.selectedBoosts, parsed.boostInventory),
             playerName: typeof parsed.playerName === "string" ? parsed.playerName : "",
             leaderboardRowId: typeof parsed.leaderboardRowId === "string" ? parsed.leaderboardRowId : "",
             leaderboardNameLocked: typeof parsed.leaderboardNameLocked === "boolean" ? parsed.leaderboardNameLocked : Boolean(parsed.playerName),
@@ -500,6 +575,8 @@ function loadData() {
         ownedCharacters: ["regular"],
         equippedCharacter: "regular",
         redeemedCodes: [],
+        boostInventory: { ...DEFAULT_BOOST_INVENTORY },
+        selectedBoosts: [],
         playerName: "",
         leaderboardRowId: "",
         leaderboardNameLocked: false,
@@ -530,6 +607,8 @@ function loadData() {
   }
 
   saveState.redeemedCodes = saveState.redeemedCodes.filter((code) => typeof code === "string");
+  saveState.boostInventory = normalizeBoostInventory(saveState.boostInventory);
+  saveState.selectedBoosts = normalizeSelectedBoosts(saveState.selectedBoosts, saveState.boostInventory);
   saveState.playerName = sanitizeAndCensorLeaderboardName(saveState.playerName);
   if (!saveState.playerName || getLeaderboardNameError(saveState.playerName)) {
     saveState.playerName = "";
@@ -555,13 +634,48 @@ function saveData() {
 }
 
 function createLeaderboardClient() {
+  if (typeof window.getBounceEJSupabaseClient === "function") {
+    return window.getBounceEJSupabaseClient();
+  }
+
+  if (window.supabaseClient) {
+    return window.supabaseClient;
+  }
+
   const config = window.BOUNCE_EJ_SUPABASE;
 
-  if (!window.supabase || !config || !config.url || !config.publishableKey) {
+  if (!window.supabase || typeof window.supabase.createClient !== "function" || !config || !config.url || !config.publishableKey) {
     return null;
   }
 
-  return window.supabase.createClient(config.url, config.publishableKey);
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey, {
+    realtime: {
+      params: {
+        eventsPerSecond: 40
+      }
+    }
+  });
+  return window.supabaseClient;
+}
+
+function refreshLeaderboardClient() {
+  leaderboardClient = createLeaderboardClient();
+  return leaderboardClient;
+}
+
+async function waitForLeaderboardClient(timeoutMs = 12000) {
+  const currentClient = refreshLeaderboardClient();
+
+  if (currentClient) {
+    return currentClient;
+  }
+
+  if (typeof window.whenBounceEJSupabaseClient === "function") {
+    leaderboardClient = await window.whenBounceEJSupabaseClient(timeoutMs);
+    return leaderboardClient;
+  }
+
+  return null;
 }
 
 function initAuth() {
@@ -1729,6 +1843,7 @@ function updateMenuStats() {
   menuTrialBest.textContent = saveState.timeTrialBestScore;
   menuCharacterImage.src = equipped.asset;
   menuCharacterImage.alt = equipped.name;
+  renderBoostButtons();
 }
 
 function showLeaderboardToast() {
@@ -2505,11 +2620,11 @@ function updateMultiplayerLobbyText() {
   showMultiplayerStatus("Waiting on ready checks.", "");
 }
 
-function createMultiplayerRoom() {
-  connectMultiplayerRoom(createRoomCode(), "host");
+async function createMultiplayerRoom() {
+  await connectMultiplayerRoom(createRoomCode(), "host");
 }
 
-function joinMultiplayerRoomFromInput() {
+async function joinMultiplayerRoomFromInput() {
   const code = sanitizeRoomCode(joinRoomInput.value);
   joinRoomInput.value = code;
 
@@ -2518,12 +2633,15 @@ function joinMultiplayerRoomFromInput() {
     return;
   }
 
-  connectMultiplayerRoom(code, "guest");
+  await connectMultiplayerRoom(code, "guest");
 }
 
-function connectMultiplayerRoom(roomCode, role) {
-  if (!leaderboardClient) {
-    showMultiplayerStatus("Supabase Realtime is offline.", "error");
+async function connectMultiplayerRoom(roomCode, role) {
+  showMultiplayerStatus("Connecting to Supabase Realtime...", "");
+  const realtimeClient = await waitForLeaderboardClient();
+
+  if (!realtimeClient) {
+    showMultiplayerStatus("Supabase Realtime is still loading or blocked. Refresh and try again.", "error");
     return;
   }
 
@@ -2536,9 +2654,11 @@ function connectMultiplayerRoom(roomCode, role) {
   multiplayer.status = "joining";
   multiplayer.joinedAt = Date.now();
 
-  const channel = leaderboardClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
+  const channel = realtimeClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
-      broadcast: { self: true },
+      // ack: true makes broadcast wait for server acknowledgement before resolving,
+      // preventing silent drops when realtime traffic spikes.
+      broadcast: { self: true, ack: true },
       presence: { key: multiplayer.playerId }
     }
   });
@@ -2547,6 +2667,7 @@ function connectMultiplayerRoom(roomCode, role) {
 
   channel
     .on("presence", { event: "sync" }, syncMultiplayerPresence)
+    .on("presence", { event: "join" }, handleMultiplayerPresenceJoin)
     .on("presence", { event: "leave" }, handleMultiplayerPresenceLeave);
 
   ["room_seed", "ready_update", "start_match", "state_tick", "player_dead", "match_result", "rematch_request", "leave_match"].forEach((eventName) => {
@@ -2681,23 +2802,28 @@ function syncMultiplayerPresence() {
     return;
   }
 
-  const hadOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
-  multiplayer.players = acceptedPlayers;
-  const hasOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
-
   if (game && game.onlineDuel && multiplayer.status === "playing") {
-    const opponent = multiplayer.players.find((player) => player.playerId !== multiplayer.playerId);
+    // During an active match, presence state is unreliable — brief reconnects or
+    // Supabase sync delays can make the opponent look absent for a moment even
+    // though they're still connected. State-ticks (receiveMultiplayerStateTick)
+    // are the authoritative liveness signal while the game is running; only
+    // update the lobby players list from presence when we're not yet playing.
+    // Still keep matchHadOpponent / matchOpponentId current so getOtherMultiplayerPlayerId works.
+    const opponentInPresence = acceptedPlayers.find((player) => player.playerId !== multiplayer.playerId);
 
-    if (opponent) {
+    if (opponentInPresence) {
       multiplayer.matchHadOpponent = true;
-      multiplayer.matchOpponentId = opponent.playerId;
+      multiplayer.matchOpponentId = opponentInPresence.playerId;
+      // Opponent is back — clear any leave grace timer so the match continues.
       multiplayer.opponentLeftAt = 0;
-      updateOpponentSnapshot(opponent);
-    } else if (hadOpponent && !multiplayer.opponentLeftAt) {
-      multiplayer.opponentLeftAt = Date.now();
     }
+
+    // Do NOT set opponentLeftAt here based on absence; let handleMultiplayerPresenceLeave
+    // and checkMultiplayerDisconnect (driven by state-tick timing) handle that.
+    return;
   }
 
+  multiplayer.players = acceptedPlayers;
   renderMultiplayerScreen();
   maybeStartMultiplayerMatch();
 }
@@ -2769,6 +2895,18 @@ function getAcceptedMultiplayerPlayers(players) {
   return (host ? [host, ...guests] : guests).slice(0, MULTIPLAYER_MAX_PLAYERS);
 }
 
+function handleMultiplayerPresenceJoin({ newPresences }) {
+  // When the opponent rejoins presence (e.g. after a brief network blip), clear
+  // any pending leave timer so the match is not incorrectly ended.
+  const opponentRejoined = (newPresences || []).some(
+    (presence) => presence.playerId && presence.playerId !== multiplayer.playerId
+  );
+
+  if (opponentRejoined && multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = 0;
+  }
+}
+
 function handleMultiplayerPresenceLeave({ leftPresences }) {
   if (!game || !game.onlineDuel || multiplayer.status !== "playing") {
     return;
@@ -2776,8 +2914,22 @@ function handleMultiplayerPresenceLeave({ leftPresences }) {
 
   const opponentLeft = (leftPresences || []).some((presence) => presence.playerId && presence.playerId !== multiplayer.playerId);
 
-  if (opponentLeft && !multiplayer.opponentLeftAt) {
-    multiplayer.opponentLeftAt = Date.now();
+  if (!opponentLeft || multiplayer.opponentLeftAt) {
+    return;
+  }
+
+  // Presence leave fires false positives during game startup — Supabase fires
+  // them whenever track() updates propagate. Only treat it as meaningful if:
+  // 1. We are past the 5-second startup grace window, AND
+  // 2. We have already received at least one real state-tick from the opponent.
+  // Otherwise, let checkMultiplayerDisconnect (state-tick silence) be the judge.
+  const now = Date.now();
+  const STARTUP_GRACE_MS = 5000;
+  const pastStartupGrace = multiplayer.matchStartedAt && (now - multiplayer.matchStartedAt) >= STARTUP_GRACE_MS;
+  const hasSeenStateTick = multiplayer.lastOpponentStateAt > (multiplayer.matchStartedAt || 0);
+
+  if (pastStartupGrace && hasSeenStateTick) {
+    multiplayer.opponentLeftAt = now;
   }
 }
 
@@ -2832,21 +2984,51 @@ function handleMultiplayerBroadcast(eventName, payload) {
   }
 }
 
-function sendMultiplayerBroadcast(eventName, payload = {}) {
-  if (!multiplayer.channel || !multiplayer.subscribed) {
-    return Promise.resolve("offline");
+async function sendMultiplayerBroadcast(eventName, payload = {}) {
+  if (!multiplayer.channel) {
+    return "offline";
   }
 
-  return multiplayer.channel.send({
-    type: "broadcast",
-    event: eventName,
-    payload: {
-      ...payload,
-      roomCode: multiplayer.roomCode,
-      senderId: multiplayer.playerId,
-      sentAt: Date.now()
+  // During active gameplay, attempt state_tick sends even if subscribed briefly
+  // dropped to false (transient reconnect). Other event types still require
+  // a confirmed subscription so we don't spam before the room is ready.
+  const isStateTick = eventName === "state_tick";
+  if (!multiplayer.subscribed && !isStateTick) {
+    return "offline";
+  }
+
+  const fullPayload = {
+    ...payload,
+    roomCode: multiplayer.roomCode,
+    senderId: multiplayer.playerId,
+    sentAt: Date.now()
+  };
+
+  // Retry rate-limited reliable broadcasts. State ticks are low-priority, so
+  // they get one attempt and the next frame will send the latest state anyway.
+  const maxRetries = isStateTick ? 1 : 3;
+  let attempts = 0;
+  let response;
+
+  do {
+    try {
+      response = await multiplayer.channel.send({
+        type: "broadcast",
+        event: eventName,
+        payload: fullPayload
+      });
+    } catch (error) {
+      response = "error";
     }
-  }).catch(() => "error");
+
+    attempts++;
+
+    if (response === "rate limited" || response === "error") {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  } while (response === "rate limited" && attempts < maxRetries);
+
+  return response;
 }
 
 function toggleMultiplayerReady() {
@@ -3134,9 +3316,12 @@ function resolveMultiplayerResult() {
   // Only the host broadcasts the authoritative result to prevent both sides
   // sending conflicting match_result payloads and both seeing themselves as winner.
   if (multiplayer.isHost) {
-    sendMultiplayerBroadcast("match_result", result);
+    const broadcastResult = Object.assign({}, result, { _fromHost: true });
+    sendMultiplayerBroadcast("match_result", broadcastResult);
+    finishMultiplayerMatch(broadcastResult);
+  } else {
+    finishMultiplayerMatch(result);
   }
-  finishMultiplayerMatch(result);
 }
 
 function getOtherMultiplayerPlayerId(playerId) {
@@ -3165,6 +3350,14 @@ function checkMultiplayerDisconnect() {
   }
 
   const now = Date.now();
+
+  // Never fire a disconnect in the first 5 seconds — state-ticks from the
+  // opponent may not have arrived yet right after game start.
+  const STARTUP_GRACE_S = 5;
+  if (multiplayer.matchStartedAt && (now - multiplayer.matchStartedAt) / 1000 < STARTUP_GRACE_S) {
+    return;
+  }
+
   const lastSeenAt = Math.max(multiplayer.lastOpponentStateAt || 0, multiplayer.matchStartedAt || 0);
 
   if (multiplayer.opponentLeftAt && multiplayer.lastOpponentStateAt > multiplayer.opponentLeftAt) {
@@ -3195,13 +3388,31 @@ function finishMultiplayerDisconnect() {
     scores: getMultiplayerScoreMap()
   };
 
-  sendMultiplayerBroadcast("match_result", result);
-  finishMultiplayerMatch(result);
+  if (multiplayer.isHost) {
+    const broadcastResult = Object.assign({}, result, { _fromHost: true });
+    sendMultiplayerBroadcast("match_result", broadcastResult);
+    finishMultiplayerMatch(broadcastResult);
+  } else {
+    finishMultiplayerMatch(result);
+  }
 }
 
 function finishMultiplayerMatch(result) {
-  if (!game || !game.onlineDuel || multiplayer.result) {
+  if (!game || !game.onlineDuel) {
     return;
+  }
+
+  // The host is the single authority on match results. If the guest has already
+  // set a local result (e.g. from a race-condition fallback) but the host's
+  // broadcast now arrives with a different verdict, the host result wins.
+  const isHostBroadcast = result._fromHost === true;
+  if (multiplayer.result) {
+    if (!multiplayer.isHost && isHostBroadcast) {
+      // Override guest's locally-derived result with the authoritative host result.
+      multiplayer.result = null;
+    } else {
+      return;
+    }
   }
 
   multiplayer.result = result;
@@ -3532,10 +3743,75 @@ function normalizePowerups(powerups) {
     .filter((entry) => entry.id && entry.effect);
 }
 
+
+function normalizeBuyablePowerups(powerups) {
+  const source = Array.isArray(powerups) ? powerups : DEFAULT_BUYABLE_POWERUPS;
+
+  return source
+    .map((entry) => {
+      const price = Number(entry.price);
+      const speedMultiplier = Number(entry.speedMultiplier);
+      const jumpMultiplier = Number(entry.jumpMultiplier);
+      const gravityMultiplier = Number(entry.gravityMultiplier);
+      const charges = Number(entry.charges);
+      const revives = Number(entry.revives);
+
+      return {
+        id: typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : "",
+        name: typeof entry.name === "string" ? entry.name : "Boost",
+        emoji: typeof entry.emoji === "string" ? entry.emoji : "✨",
+        price: Number.isFinite(price) && price >= 0 ? Math.round(price) : 0,
+        effect: typeof entry.effect === "string" ? entry.effect : "",
+        speedMultiplier: Number.isFinite(speedMultiplier) && speedMultiplier > 0 ? speedMultiplier : 1,
+        jumpMultiplier: Number.isFinite(jumpMultiplier) && jumpMultiplier > 0 ? jumpMultiplier : 1,
+        gravityMultiplier: Number.isFinite(gravityMultiplier) && gravityMultiplier > 0 ? gravityMultiplier : 1,
+        charges: Number.isFinite(charges) && charges > 0 ? Math.round(charges) : 0,
+        revives: Number.isFinite(revives) && revives > 0 ? Math.round(revives) : 0,
+        description: typeof entry.description === "string" ? entry.description : "One-round boost.",
+        message: typeof entry.message === "string" ? entry.message : "Boost active!"
+      };
+    })
+    .filter((entry) => entry.id && entry.effect);
+}
+
+function normalizeBoostInventory(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const inventory = {};
+
+  buyablePowerupDefinitions.forEach((boost) => {
+    const count = Number(source[boost.id]);
+    inventory[boost.id] = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  });
+
+  return inventory;
+}
+
+function normalizeSelectedBoosts(value, inventory = saveState.boostInventory) {
+  const source = Array.isArray(value) ? value : [];
+  const counts = normalizeBoostInventory(inventory);
+
+  return source.filter((id, index, ids) => {
+    return typeof id === "string" && ids.indexOf(id) === index && buyablePowerupById[id] && counts[id] > 0;
+  });
+}
+
+function getBoostCount(boostId) {
+  return Math.max(0, Math.floor(Number(saveState.boostInventory && saveState.boostInventory[boostId]) || 0));
+}
+
+function isBoostSelected(boostId) {
+  return saveState.selectedBoosts.includes(boostId);
+}
+
 function renderStore() {
   storeXp.textContent = saveState.xp;
   renderStoreTabs();
   storeList.innerHTML = "";
+
+  if (activeStoreSection === BOOST_STORE_SECTION) {
+    renderBoostStore();
+    return;
+  }
 
   const characters = getStoreCharacters();
 
@@ -3580,6 +3856,61 @@ function renderStore() {
   });
 }
 
+function renderBoostStore() {
+  if (!buyablePowerupDefinitions.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-store";
+    empty.textContent = "No boosts are available yet.";
+    storeList.appendChild(empty);
+    return;
+  }
+
+  buyablePowerupDefinitions.forEach((boost) => {
+    const count = getBoostCount(boost.id);
+    const selected = isBoostSelected(boost.id);
+    const item = document.createElement("div");
+    item.className = "shop-item boost-shop-item";
+
+    const preview = document.createElement("div");
+    preview.className = "boost-preview";
+    preview.textContent = boost.emoji;
+
+    const copy = document.createElement("div");
+    copy.className = "item-copy";
+    const title = document.createElement("div");
+    const name = document.createElement("strong");
+    const owned = document.createElement("span");
+    const description = document.createElement("span");
+    title.className = "item-title";
+    name.textContent = boost.name;
+    owned.className = "boost-owned-count";
+    owned.textContent = `Owned: ${count}`;
+    description.textContent = `${boost.description} ${boost.price} XP each.`;
+    title.append(name, owned);
+    copy.append(title, description);
+
+    const actions = document.createElement("div");
+    actions.className = "boost-shop-actions";
+
+    const buyButton = document.createElement("button");
+    buyButton.type = "button";
+    buyButton.textContent = "Buy";
+    buyButton.disabled = saveState.xp < boost.price;
+    buyButton.addEventListener("click", () => buyBoost(boost.id));
+
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.textContent = selected ? "Selected" : "Use Next";
+    selectButton.className = selected ? "is-selected" : "";
+    selectButton.disabled = count <= 0 && !selected;
+    selectButton.addEventListener("click", () => toggleSelectedBoost(boost.id));
+
+    actions.append(buyButton, selectButton);
+    item.append(preview, copy, actions);
+    storeList.appendChild(item);
+  });
+}
+
 function renderStoreTabs() {
   const sections = getStoreSections();
 
@@ -3613,8 +3944,64 @@ function getStoreCharacters() {
 }
 
 function getStoreSections() {
-  return [...new Set(CHARACTERS.map((character) => character.section || DEFAULT_CHARACTER_SECTION))]
+  return [...new Set([...CHARACTERS.map((character) => character.section || DEFAULT_CHARACTER_SECTION), BOOST_STORE_SECTION])]
     .sort(compareSections);
+}
+
+function buyBoost(boostId) {
+  const boost = buyablePowerupById[boostId];
+
+  if (!boost || saveState.xp < boost.price) {
+    return;
+  }
+
+  saveState.xp -= boost.price;
+  saveState.boostInventory[boost.id] = getBoostCount(boost.id) + 1;
+  saveData();
+  renderStore();
+  renderBoostButtons();
+  updateMenuStats();
+}
+
+function toggleSelectedBoost(boostId) {
+  if (!buyablePowerupById[boostId]) {
+    return;
+  }
+
+  if (isBoostSelected(boostId)) {
+    saveState.selectedBoosts = saveState.selectedBoosts.filter((id) => id !== boostId);
+  } else if (getBoostCount(boostId) > 0) {
+    saveState.selectedBoosts.push(boostId);
+  }
+
+  saveState.selectedBoosts = normalizeSelectedBoosts(saveState.selectedBoosts, saveState.boostInventory);
+  saveData();
+  renderStore();
+  renderBoostButtons();
+}
+
+function renderBoostButtons() {
+  if (!boostButtonList) {
+    return;
+  }
+
+  boostButtonList.innerHTML = "";
+
+  buyablePowerupDefinitions.forEach((boost) => {
+    const count = getBoostCount(boost.id);
+    const selected = isBoostSelected(boost.id);
+    const button = document.createElement("button");
+    const countLabel = count > 99 ? "99+" : String(count);
+
+    button.type = "button";
+    button.className = selected ? "is-selected" : "";
+    button.disabled = count <= 0 && !selected;
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+    button.title = count > 0 ? `${boost.name}: ${count} owned` : `${boost.name}: buy more in the shop`;
+    button.innerHTML = `<span aria-hidden="true">${boost.emoji}</span><strong>${countLabel}</strong>`;
+    button.addEventListener("click", () => toggleSelectedBoost(boost.id));
+    boostButtonList.appendChild(button);
+  });
 }
 
 function compareCharactersForStore(first, second) {
@@ -3999,6 +4386,90 @@ function getPlatformWidth(type) {
   return 72;
 }
 
+function consumeSelectedBoostsForRun() {
+  const selected = normalizeSelectedBoosts(saveState.selectedBoosts, saveState.boostInventory);
+  const activeBoosts = [];
+
+  selected.forEach((boostId) => {
+    const count = getBoostCount(boostId);
+    const boost = buyablePowerupById[boostId];
+
+    if (!boost || count <= 0) {
+      return;
+    }
+
+    saveState.boostInventory[boostId] = count - 1;
+    activeBoosts.push(boost);
+  });
+
+  saveState.selectedBoosts = [];
+
+  if (activeBoosts.length) {
+    saveData();
+    renderBoostButtons();
+    renderStore();
+    updateMenuStats();
+  }
+
+  return activeBoosts;
+}
+
+function createRunBoostEffects(activeBoosts) {
+  return activeBoosts.reduce((effects, boost) => {
+    if (boost.effect === "speed") {
+      effects.speedMultiplier *= boost.speedMultiplier;
+    }
+
+    if (boost.effect === "jump") {
+      effects.jumpMultiplier *= boost.jumpMultiplier;
+    }
+
+    if (boost.effect === "slowFall") {
+      effects.gravityMultiplier *= boost.gravityMultiplier;
+    }
+
+    if (boost.effect === "doubleJump") {
+      effects.doubleJumpsRemaining += boost.charges || 2;
+    }
+
+    if (boost.effect === "revive") {
+      effects.revivesRemaining += boost.revives || 1;
+    }
+
+    return effects;
+  }, {
+    speedMultiplier: 1,
+    jumpMultiplier: 1,
+    gravityMultiplier: 1,
+    doubleJumpsRemaining: 0,
+    revivesRemaining: 0
+  });
+}
+
+function getRunSpeedMultiplier() {
+  return game && game.effects ? game.effects.speedMultiplier || 1 : 1;
+}
+
+function getRunJumpMultiplier() {
+  return game && game.effects ? game.effects.jumpMultiplier || 1 : 1;
+}
+
+function getRunGravityMultiplier() {
+  return game && game.effects ? game.effects.gravityMultiplier || 1 : 1;
+}
+
+function getActiveBoostMessage(activeBoosts) {
+  if (!activeBoosts.length) {
+    return "";
+  }
+
+  if (activeBoosts.length === 1) {
+    return `${activeBoosts[0].emoji} ${activeBoosts[0].message}`;
+  }
+
+  return `${activeBoosts.map((boost) => boost.emoji).join(" ")} ${activeBoosts.length} boosts active this round!`;
+}
+
 function startGame(modeId = "classic", options = {}) {
   if (isAccountBanned()) {
     updateBannedState();
@@ -4014,6 +4485,8 @@ function startGame(modeId = "classic", options = {}) {
   const width = canvas.clientWidth || 420;
   const height = canvas.clientHeight || 720;
   const isOnlineDuel = Boolean(options.onlineDuel);
+  const activeBoosts = isOnlineDuel ? [] : consumeSelectedBoostsForRun();
+  const runBoostEffects = createRunBoostEffects(activeBoosts);
   const rng = options.seed ? createSeededRandom(options.seed) : Math.random;
   const seeded = seedPlatforms(width, height, mode, rng);
   const startY = height - 95 - 48;
@@ -4060,11 +4533,13 @@ function startGame(modeId = "classic", options = {}) {
     backgroundAds: [],
     nextBackgroundAdAt: BACKGROUND_AD_INTERVAL_SECONDS,
     particles: [],
+    activeBoosts,
     effects: {
+      ...runBoostEffects,
       xpMultiplier: 1,
       xpMultiplierUntil: 0,
-      message: "",
-      messageUntil: 0
+      message: getActiveBoostMessage(activeBoosts),
+      messageUntil: activeBoosts.length ? 3 : 0
     },
     player: {
       x: width / 2 - 24,
@@ -4073,7 +4548,7 @@ function startGame(modeId = "classic", options = {}) {
       height: 48,
       maxSize: 76,
       vx: 0,
-      vy: getJumpVelocityForRamp(1, mode),
+      vy: -740 * mode.jumpScale * runBoostEffects.jumpMultiplier,
       onScreen: true
     }
   };
@@ -4108,6 +4583,9 @@ function hideRunOverlays() {
   hideAdminJumpscare();
   gameOverMessage.classList.add("hidden");
   gameOverMessage.textContent = "";
+  if (doubleJumpButton) {
+    doubleJumpButton.classList.add("hidden");
+  }
 }
 
 function resetInput() {
@@ -4233,9 +4711,10 @@ function updateGame(deltaSeconds) {
   const sensitivity = getControlSensitivity();
   const touchAccelerationScale = touchMoving ? 1.32 : 1;
   const touchSpeedScale = touchMoving ? 1.18 : 1;
-  const acceleration = 3600 * sensitivity * touchAccelerationScale * game.modeConfig.speedScale * Math.min(1.45, 1 + (ramp - 1) * 0.5);
-  const maxSpeed = 380 * sensitivity * touchSpeedScale * game.modeConfig.speedScale * Math.min(1.35, 1 + (ramp - 1) * 0.35);
-  const gravity = 1500 * game.modeConfig.gravityScale * Math.min(1.45, 1 + (ramp - 1) * 0.35);
+  const speedBoost = getRunSpeedMultiplier();
+  const acceleration = 3600 * sensitivity * touchAccelerationScale * game.modeConfig.speedScale * speedBoost * Math.min(1.45, 1 + (ramp - 1) * 0.5);
+  const maxSpeed = 380 * sensitivity * touchSpeedScale * game.modeConfig.speedScale * speedBoost * Math.min(1.35, 1 + (ramp - 1) * 0.35);
+  const gravity = 1500 * game.modeConfig.gravityScale * getRunGravityMultiplier() * Math.min(1.45, 1 + (ramp - 1) * 0.35);
   const friction = 0.9;
 
   updatePlatforms(deltaSeconds);
@@ -4281,7 +4760,9 @@ function updateGame(deltaSeconds) {
   markAntiCheatCheckpoint();
 
   if (player.y - game.cameraY > game.height + 90) {
-    endGame("fell");
+    if (!revivePlayer()) {
+      endGame("fell");
+    }
   }
 }
 
@@ -4378,7 +4859,7 @@ function validateAntiCheatFrame(previous) {
   const downwardStep = Math.max(0, dy);
   const expectedScoreLimit = Math.max(0, Math.floor((game.startY - game.highestPoint) / 10)) + 12;
   const maxUpwardVelocity = Math.abs(getBouncePadVelocityForRamp(1.9, game.modeConfig)) + 360;
-  const maxHorizontalVelocity = 900 * getControlSensitivity() * game.modeConfig.speedScale;
+  const maxHorizontalVelocity = 900 * getControlSensitivity() * game.modeConfig.speedScale * getRunSpeedMultiplier();
 
   if (dx > ANTI_CHEAT_MAX_HORIZONTAL_STEP && !isAllowedHorizontalWrap(previous, current)) {
     triggerAntiCheat("impossible horizontal movement");
@@ -4452,11 +4933,11 @@ function getModeRamp() {
 }
 
 function getJumpVelocityForRamp(ramp, modeConfig = game.modeConfig) {
-  return -740 * ramp * modeConfig.jumpScale;
+  return -740 * ramp * modeConfig.jumpScale * getRunJumpMultiplier();
 }
 
 function getBouncePadVelocityForRamp(ramp, modeConfig = game.modeConfig) {
-  return -1050 * ramp * modeConfig.jumpScale;
+  return -1050 * ramp * modeConfig.jumpScale * getRunJumpMultiplier();
 }
 
 function getMoveDirection() {
@@ -4563,6 +5044,38 @@ function collectPowerups() {
       burst(powerupX, powerupY, "#ffffff");
     }
   });
+}
+
+function useDoubleJump() {
+  if (!game || !game.running || game.paused || game.countdownActive || game.effects.doubleJumpsRemaining <= 0) {
+    return;
+  }
+
+  game.effects.doubleJumpsRemaining -= 1;
+  game.player.vy = Math.min(game.player.vy, getJumpVelocityForRamp(Math.max(1, getModeRamp() * 0.92)));
+  game.effects.message = "🪽 Double jump!";
+  game.effects.messageUntil = game.runTime + 1.5;
+  burst(game.player.x + game.player.width / 2, game.player.y + game.player.height, "#ffffff");
+  updateHud();
+  markAntiCheatCheckpoint();
+}
+
+function revivePlayer() {
+  if (!game || game.effects.revivesRemaining <= 0) {
+    return false;
+  }
+
+  game.effects.revivesRemaining -= 1;
+  game.player.x = game.width / 2 - game.player.width / 2;
+  game.player.y = game.cameraY + game.height * 0.42;
+  game.player.vx = 0;
+  game.player.vy = getJumpVelocityForRamp(Math.max(1, getModeRamp()));
+  game.effects.message = "❤️ Revived!";
+  game.effects.messageUntil = game.runTime + 2;
+  burst(game.player.x + game.player.width / 2, game.player.y + game.player.height / 2, "#ff4a6d");
+  updateHud();
+  markAntiCheatCheckpoint();
+  return true;
 }
 
 function gainRunXp(amount) {
@@ -4742,6 +5255,18 @@ function updateHud() {
   }
 
   updatePowerupHud();
+  updateBoostHud();
+}
+
+function updateBoostHud() {
+  if (!doubleJumpButton || !game) {
+    return;
+  }
+
+  const charges = game.effects.doubleJumpsRemaining || 0;
+  doubleJumpButton.textContent = `Double Jump x${charges}`;
+  doubleJumpButton.disabled = charges <= 0 || game.paused || game.countdownActive;
+  doubleJumpButton.classList.toggle("hidden", charges <= 0);
 }
 
 function updatePowerupHud() {
@@ -4769,6 +5294,10 @@ function updatePowerupHud() {
 
 function endGame(reason = "fell") {
   if (!game || !game.running) {
+    return;
+  }
+
+  if (reason === "fell" && revivePlayer()) {
     return;
   }
 
@@ -4800,6 +5329,9 @@ function endGame(reason = "fell") {
   finalBest.textContent = getModeBest(game.mode);
   finalTotalXp.textContent = saveState.xp;
   prepareLeaderboardSubmit();
+  if (doubleJumpButton) {
+    doubleJumpButton.classList.add("hidden");
+  }
   gameOverOverlay.classList.remove("hidden");
   autoSubmitLeaderboardScore();
 }
@@ -5150,6 +5682,12 @@ function handleKeyboardInput(event, isPressed) {
     return;
   }
 
+  if ((event.key === " " || event.key === "Spacebar") && isPressed && !event.repeat) {
+    useDoubleJump();
+    event.preventDefault();
+    return;
+  }
+
   if (event.key === "a" || event.key === "A" || event.key === "ArrowLeft") {
     if (game && game.paused) {
       event.preventDefault();
@@ -5359,6 +5897,9 @@ mainMenuButton.addEventListener("click", () => {
 });
 pauseResumeButton.addEventListener("click", () => setPaused(false));
 pauseEndButton.addEventListener("click", () => endGame("paused"));
+if (doubleJumpButton) {
+  doubleJumpButton.addEventListener("click", useDoubleJump);
+}
 redeemButton.addEventListener("click", redeemCode);
 leaderboardButton.addEventListener("click", showLeaderboardToast);
 leaderboardRefreshButton.addEventListener("click", () => {
@@ -5406,6 +5947,9 @@ authOverlay.addEventListener("click", (event) => {
   if (event.target === authOverlay) {
     hideAuthOverlay();
   }
+});
+authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
 });
 authSignInButton.addEventListener("click", signInAccount);
 authSignUpButton.addEventListener("click", signUpAccount);
@@ -5460,6 +6004,15 @@ loadCharacterImages();
 loadBackgroundAdImages();
 loadData();
 initAuth();
+if (!leaderboardClient && window.BounceEJSupabaseReady) {
+  window.BounceEJSupabaseReady.then(() => {
+    if (refreshLeaderboardClient()) {
+      initAuth();
+      updateAuthUi();
+      loadLeaderboard();
+    }
+  });
+}
 showMenu();
 
 // ============================================

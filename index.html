@@ -76,6 +76,13 @@
             </div>
           </aside>
         </div>
+        <aside class="boost-corner-card" aria-label="One-round boosts">
+          <div class="boost-corner-heading">
+            <strong>Boosts</strong>
+            <span>Pick before Play</span>
+          </div>
+          <div id="boostButtonList" class="boost-button-list"></div>
+        </aside>
         <div id="leaderboardToast" class="menu-toast-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="leaderboardTitle">
           <div class="leaderboard-card leaderboard-toast-card">
             <div class="leaderboard-heading">
@@ -96,17 +103,19 @@
               <button id="authCloseButton" type="button">Close</button>
             </div>
             <p id="authAccountSummary" class="auth-summary">Sign in to sync XP, skins, and leaderboard progress.</p>
-            <label for="authEmailInput">Email</label>
-            <input id="authEmailInput" class="auth-input" type="email" autocomplete="email" placeholder="you@example.com">
-            <label for="authPasswordInput">Password</label>
-            <input id="authPasswordInput" class="auth-input" type="password" autocomplete="current-password" placeholder="Password">
-            <label for="authNameInput">Display name</label>
-            <input id="authNameInput" class="auth-input" type="text" maxlength="18" autocomplete="nickname" placeholder="Leaderboard name">
-            <div class="auth-actions">
-              <button id="authSignInButton" class="primary-button" type="button">Sign In</button>
-              <button id="authSignUpButton" type="button">Create</button>
-              <button id="authSignOutButton" class="danger-button hidden" type="button">Sign Out</button>
-            </div>
+            <form id="authForm" novalidate>
+              <label for="authEmailInput">Email</label>
+              <input id="authEmailInput" class="auth-input" type="email" autocomplete="email" placeholder="you@example.com">
+              <label for="authPasswordInput">Password</label>
+              <input id="authPasswordInput" class="auth-input" type="password" autocomplete="current-password" placeholder="Password">
+              <label for="authNameInput">Display name</label>
+              <input id="authNameInput" class="auth-input" type="text" maxlength="18" autocomplete="nickname" placeholder="Leaderboard name">
+              <div class="auth-actions">
+                <button id="authSignInButton" class="primary-button" type="button">Sign In</button>
+                <button id="authSignUpButton" type="button">Create</button>
+                <button id="authSignOutButton" class="danger-button hidden" type="button">Sign Out</button>
+              </div>
+            </form>
             <p id="authMessage" class="auth-message" aria-live="polite"></p>
           </div>
         </div>
@@ -274,6 +283,7 @@
           <div class="touch-zone touch-zone-left">‹</div>
           <div class="touch-zone touch-zone-right">›</div>
         </div>
+        <button id="doubleJumpButton" class="double-jump-button hidden" type="button" aria-live="polite">Double Jump x0</button>
         <div id="countdownOverlay" class="countdown-overlay hidden" aria-live="polite">
           <div id="countdownText" class="countdown-text">3</div>
         </div>
@@ -317,25 +327,14 @@
     </div>
   </section>
 
-    <!-- 1. The Supabase SDK (Fixed Link) -->
-  <script src="https://jsdelivr.net"></script>
+  <!-- 1. Supabase SDK loader and config (game scripts lazily wait for the SDK when needed) -->
+  <script src="supabase-loader.js"></script>
+  <script src="supabase-config.js"></script>
 
-  <!-- 2. Your Config (Must come before other scripts) -->
-  <script>
-    window.BOUNCE_EJ_SUPABASE = {
-      url: "https://supabase.co",
-      publishableKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImltaG9yd2RtdmhndXZzYXlsZXFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc2NTQ4MjMsImV4cCI6MjA5MzIzMDgyM30.r0rKsHkIAQ8GrUPCY0rYS1z-8rT7fTGDRJfWU6RSNWM"
-    };
-    // Create the client once so it's available everywhere
-    window.supabaseClient = window.supabase.createClient(
-      window.BOUNCE_EJ_SUPABASE.url, 
-      window.BOUNCE_EJ_SUPABASE.publishableKey
-    );
-  </script>
-
-  <!-- 3. Your other game files -->
+  <!-- 2. Game files -->
   <script src="characters.js"></script>
   <script src="powerups.js"></script>
+  <script src="buyable-powerups.js"></script>
   <script src="admin-listener.js"></script>
   <script src="multiplayer.js"></script>
   <script src="script.js"></script>
