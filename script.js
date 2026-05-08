@@ -1772,17 +1772,24 @@ function showMultiplayer() {
   showScreen(multiplayerScreen);
 }
 
-function showStore() {
+function showStore(section = activeStoreSection) {
   if (isAccountBanned()) {
     updateBannedState();
     return;
   }
 
   stopGameLoop();
+  if (section) {
+    activeStoreSection = section;
+  }
   setRedeemMessage("");
   redeemInput.value = "";
   renderStore();
   showScreen(storeScreen);
+}
+
+function showBoostStore() {
+  showStore(BOOST_STORE_SECTION);
 }
 
 function showGameModes() {
@@ -2824,6 +2831,7 @@ function syncMultiplayerPresence() {
     multiplayer.opponentLeftAt = Date.now();
   }
 
+  multiplayer.players = acceptedPlayers;
   renderMultiplayerScreen();
   maybeStartMultiplayerMatch();
 }
@@ -5934,7 +5942,16 @@ multiplayerLeaveButton.addEventListener("click", () => {
   leaveMultiplayerRoom(true);
   renderMultiplayerScreen();
 });
-storeButton.addEventListener("click", showStore);
+storeButton.addEventListener("click", () => showStore());
+if (buyBoostsButton) {
+  buyBoostsButton.addEventListener("click", showBoostStore);
+}
+if (storeBoostsShortcutButton) {
+  storeBoostsShortcutButton.addEventListener("click", () => {
+    activeStoreSection = BOOST_STORE_SECTION;
+    renderStore();
+  });
+}
 characterButton.addEventListener("click", showCharacterSelect);
 controlsButton.addEventListener("click", showControls);
 storeBackButton.addEventListener("click", showMenu);
