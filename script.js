@@ -361,6 +361,11 @@ const storeXp = document.getElementById("storeXp");
 const storeTabs = document.getElementById("storeTabs");
 const storeList = document.getElementById("storeList");
 const boostButtonList = document.getElementById("boostButtonList");
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+const buyBoostsButton = document.getElementById("buyBoostsButton");
+const storeBoostsShortcutButton = document.getElementById("storeBoostsShortcutButton");
+=======
+>>>>>>> main
 const characterList = document.getElementById("characterList");
 const redeemInput = document.getElementById("redeemInput");
 const redeemButton = document.getElementById("redeemButton");
@@ -475,11 +480,16 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
 let leaderboardClient = createLeaderboardClient();
 
 function getLeaderboardClient() {
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+  // Re-attempt client creation if the deferred Supabase loader finished after script startup.
+  return leaderboardClient || refreshLeaderboardClient();
+=======
   // Re-attempt client creation if CDN loaded after our script ran.
   if (!leaderboardClient && window.supabase) {
     leaderboardClient = createLeaderboardClient();
   }
   return leaderboardClient;
+>>>>>>> main
 }
 
 const authState = {
@@ -638,6 +648,13 @@ function saveData() {
 }
 
 function createLeaderboardClient() {
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+  if (typeof window.getBounceEJSupabaseClient === "function") {
+    return window.getBounceEJSupabaseClient();
+  }
+
+=======
+>>>>>>> main
   if (window.supabaseClient) {
     return window.supabaseClient;
   }
@@ -656,6 +673,29 @@ function createLeaderboardClient() {
     }
   });
   return window.supabaseClient;
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+}
+
+function refreshLeaderboardClient() {
+  leaderboardClient = createLeaderboardClient();
+  return leaderboardClient;
+}
+
+async function waitForLeaderboardClient(timeoutMs = 12000) {
+  const currentClient = refreshLeaderboardClient();
+
+  if (currentClient) {
+    return currentClient;
+  }
+
+  if (typeof window.whenBounceEJSupabaseClient === "function") {
+    leaderboardClient = await window.whenBounceEJSupabaseClient(timeoutMs);
+    return leaderboardClient;
+  }
+
+  return null;
+=======
+>>>>>>> main
 }
 
 function initAuth() {
@@ -1772,17 +1812,24 @@ function showMultiplayer() {
   showScreen(multiplayerScreen);
 }
 
-function showStore() {
+function showStore(section = activeStoreSection) {
   if (isAccountBanned()) {
     updateBannedState();
     return;
   }
 
   stopGameLoop();
+  if (section) {
+    activeStoreSection = section;
+  }
   setRedeemMessage("");
   redeemInput.value = "";
   renderStore();
   showScreen(storeScreen);
+}
+
+function showBoostStore() {
+  showStore(BOOST_STORE_SECTION);
 }
 
 function showGameModes() {
@@ -2618,6 +2665,14 @@ async function joinMultiplayerRoomFromInput() {
   await connectMultiplayerRoom(code, "guest");
 }
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+async function connectMultiplayerRoom(roomCode, role) {
+  showMultiplayerStatus("Connecting to Supabase Realtime...", "");
+  const realtimeClient = await waitForLeaderboardClient();
+
+  if (!realtimeClient) {
+    showMultiplayerStatus("Supabase Realtime is still loading or blocked. Refresh and try again.", "error");
+=======
 function connectMultiplayerRoom(roomCode, role) {
   // Retry client creation in case the Supabase CDN loaded after our script ran.
   const client = getLeaderboardClient();
@@ -2626,6 +2681,7 @@ function connectMultiplayerRoom(roomCode, role) {
       ? "Could not reach Supabase CDN. Check your internet connection."
       : "Supabase is not configured. Check supabase-config.js.";
     showMultiplayerStatus(reason, "error");
+>>>>>>> main
     return;
   }
 
@@ -2638,11 +2694,18 @@ function connectMultiplayerRoom(roomCode, role) {
   multiplayer.status = "joining";
   multiplayer.joinedAt = Date.now();
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+  const channel = realtimeClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
+    config: {
+      // ack: true makes broadcast wait for server acknowledgement before resolving,
+      // preventing silent drops when realtime traffic spikes.
+=======
   const channel = client.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
       // ack: true makes broadcast wait for server acknowledgement before resolving,
       // matching the article's RealtimeChannelConfig(ack: true) recommendation.
       // This prevents silent message drops under load.
+>>>>>>> main
       broadcast: { self: true, ack: true },
       presence: { key: multiplayer.playerId }
     }
@@ -2798,13 +2861,25 @@ function syncMultiplayerPresence() {
     // though they're still connected. State-ticks (receiveMultiplayerStateTick)
     // are the authoritative liveness signal while the game is running; only
     // update the lobby players list from presence when we're not yet playing.
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+    // Still keep matchHadOpponent / matchOpponentId current so getOtherMultiplayerPlayerId works.
     const opponentInPresence = acceptedPlayers.find((player) => player.playerId !== multiplayer.playerId);
+
+=======
+    const opponentInPresence = acceptedPlayers.find((player) => player.playerId !== multiplayer.playerId);
+>>>>>>> main
     if (opponentInPresence) {
       multiplayer.matchHadOpponent = true;
       multiplayer.matchOpponentId = opponentInPresence.playerId;
       // Opponent is back — clear any leave grace timer so the match continues.
       multiplayer.opponentLeftAt = 0;
     }
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+
+    // Do NOT set opponentLeftAt here based on absence; let handleMultiplayerPresenceLeave
+    // and checkMultiplayerDisconnect (driven by state-tick timing) handle that.
+    return;
+=======
     // Do NOT set opponentLeftAt here based on absence; let handleMultiplayerPresenceLeave
     // and checkMultiplayerDisconnect (driven by state-tick timing) handle that.
     return;
@@ -2822,8 +2897,10 @@ function syncMultiplayerPresence() {
   const hasOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
   if (!hasOpponent && hadOpponent && !multiplayer.opponentLeftAt) {
     multiplayer.opponentLeftAt = Date.now();
+>>>>>>> main
   }
 
+  multiplayer.players = acceptedPlayers;
   renderMultiplayerScreen();
   maybeStartMultiplayerMatch();
 }
@@ -2920,8 +2997,13 @@ function handleMultiplayerPresenceLeave({ leftPresences }) {
 
   // Presence leave fires false positives during game startup — Supabase fires
   // them whenever track() updates propagate. Only treat it as meaningful if:
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+  // 1. We are past the 5-second startup grace window, AND
+  // 2. We have already received at least one real state-tick from the opponent.
+=======
   //   1. We are past the 5-second startup grace window, AND
   //   2. We have already received at least one real state-tick from the opponent.
+>>>>>>> main
   // Otherwise, let checkMultiplayerDisconnect (state-tick silence) be the judge.
   const now = Date.now();
   const STARTUP_GRACE_MS = 5000;
@@ -3004,9 +3086,14 @@ async function sendMultiplayerBroadcast(eventName, payload = {}) {
     sentAt: Date.now()
   };
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+  // Retry rate-limited reliable broadcasts. State ticks are low-priority, so
+  // they get one attempt and the next frame will send the latest state anyway.
+=======
   // Retry loop matching the article's pattern: if Supabase rate-limits the send,
   // wait one animation frame and retry. Cap at 3 attempts to avoid spinning forever.
   // State ticks are low-priority so skip retry for them — just drop and wait for next tick.
+>>>>>>> main
   const maxRetries = isStateTick ? 1 : 3;
   let attempts = 0;
   let response;
@@ -3018,6 +3105,18 @@ async function sendMultiplayerBroadcast(eventName, payload = {}) {
         event: eventName,
         payload: fullPayload
       });
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+    } catch (error) {
+      response = "error";
+    }
+
+    attempts++;
+
+    if (response === "rate limited" || response === "error") {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  } while (response === "rate limited" && attempts < maxRetries);
+=======
     } catch {
       response = "error";
     }
@@ -3032,6 +3131,7 @@ async function sendMultiplayerBroadcast(eventName, payload = {}) {
     (response === "rate limited") &&
     attempts < maxRetries
   );
+>>>>>>> main
 
   return response;
 }
@@ -3334,11 +3434,17 @@ function resolveMultiplayerResult() {
   }
 
   if (multiplayer.isHost) {
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+=======
     // Host is the single authority: broadcast the result then apply it locally.
+>>>>>>> main
     const broadcastResult = Object.assign({}, result, { _fromHost: true });
     sendMultiplayerBroadcast("match_result", broadcastResult);
     finishMultiplayerMatch(broadcastResult);
   } else {
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+    finishMultiplayerMatch(result);
+=======
     // Guest waits for the host's match_result broadcast (already handled in
     // handleMultiplayerBroadcast). Only apply locally as a last-resort fallback
     // if the host broadcast hasn't arrived within 10 seconds.
@@ -3347,6 +3453,7 @@ function resolveMultiplayerResult() {
         finishMultiplayerMatch(result);
       }
     }, 10000);
+>>>>>>> main
   }
 }
 
@@ -3415,11 +3522,17 @@ function finishMultiplayerDisconnect() {
   };
 
   if (multiplayer.isHost) {
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+=======
     // Host is the authority on disconnect results too — broadcast then apply.
+>>>>>>> main
     const broadcastResult = Object.assign({}, result, { _fromHost: true });
     sendMultiplayerBroadcast("match_result", broadcastResult);
     finishMultiplayerMatch(broadcastResult);
   } else {
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+    finishMultiplayerMatch(result);
+=======
     // Guest: give the host extra time to send a result before declaring victory ourselves.
     // If host's match_result arrives first, guestFallbackTimer is cleared and we never apply this.
     if (!multiplayer.guestFallbackTimer) {
@@ -3429,6 +3542,7 @@ function finishMultiplayerDisconnect() {
         }
       }, 8000);
     }
+>>>>>>> main
   }
 }
 
@@ -5934,7 +6048,16 @@ multiplayerLeaveButton.addEventListener("click", () => {
   leaveMultiplayerRoom(true);
   renderMultiplayerScreen();
 });
-storeButton.addEventListener("click", showStore);
+storeButton.addEventListener("click", () => showStore());
+if (buyBoostsButton) {
+  buyBoostsButton.addEventListener("click", showBoostStore);
+}
+if (storeBoostsShortcutButton) {
+  storeBoostsShortcutButton.addEventListener("click", () => {
+    activeStoreSection = BOOST_STORE_SECTION;
+    renderStore();
+  });
+}
 characterButton.addEventListener("click", showCharacterSelect);
 controlsButton.addEventListener("click", showControls);
 storeBackButton.addEventListener("click", showMenu);

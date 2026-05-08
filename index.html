@@ -82,6 +82,10 @@
             <span>Pick before Play</span>
           </div>
           <div id="boostButtonList" class="boost-button-list"></div>
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+          <button id="buyBoostsButton" class="buy-boosts-button" type="button">Buy Powerups</button>
+=======
+>>>>>>> main
         </aside>
         <div id="leaderboardToast" class="menu-toast-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="leaderboardTitle">
           <div class="leaderboard-card leaderboard-toast-card">
@@ -181,6 +185,10 @@
           <button id="storeBackButton" class="back-button">Back</button>
           <h2>Item Shop</h2>
           <div class="small-stat">XP <strong id="storeXp">0</strong></div>
+        </div>
+        <div class="boost-shop-callout">
+          <strong>Need powerups?</strong> Open the <b>Boosts</b> tab to buy one-round Speed Boost, Double Jumps, Revive, Jump Boost, and Slow Falling.
+          <button id="storeBoostsShortcutButton" type="button">Show Boosts</button>
         </div>
         <div class="redeem-card">
           <label for="redeemInput">Redeem code</label>
@@ -327,6 +335,11 @@
     </div>
   </section>
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
+  <!-- 1. Supabase SDK loader and config (game scripts lazily wait for the SDK when needed) -->
+  <script src="supabase-loader.js"></script>
+  <script src="supabase-config.js"></script>
+=======
   <!-- 1. Supabase SDK and config (must load before scripts that use Supabase) -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="supabase-config.js"></script>
@@ -340,6 +353,7 @@
       console.warn("Supabase SDK did not load; online features are unavailable.");
     }
   </script>
+>>>>>>> main
 
   <!-- 2. Game files -->
   <script src="characters.js"></script>
