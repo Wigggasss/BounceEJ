@@ -76,6 +76,13 @@
             </div>
           </aside>
         </div>
+        <aside class="boost-corner-card" aria-label="One-round boosts">
+          <div class="boost-corner-heading">
+            <strong>Boosts</strong>
+            <span>Pick before Play</span>
+          </div>
+          <div id="boostButtonList" class="boost-button-list"></div>
+        </aside>
         <div id="leaderboardToast" class="menu-toast-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="leaderboardTitle">
           <div class="leaderboard-card leaderboard-toast-card">
             <div class="leaderboard-heading">
@@ -276,6 +283,7 @@
           <div class="touch-zone touch-zone-left">‹</div>
           <div class="touch-zone touch-zone-right">›</div>
         </div>
+        <button id="doubleJumpButton" class="double-jump-button hidden" type="button" aria-live="polite">Double Jump x0</button>
         <div id="countdownOverlay" class="countdown-overlay hidden" aria-live="polite">
           <div id="countdownText" class="countdown-text">3</div>
         </div>
@@ -336,6 +344,7 @@
   <!-- 2. Game files -->
   <script src="characters.js"></script>
   <script src="powerups.js"></script>
+  <script src="buyable-powerups.js"></script>
   <script src="admin-listener.js"></script>
   <script src="multiplayer.js"></script>
   <script src="script.js"></script>
