@@ -14,6 +14,7 @@ window.getBounceEJSupabaseClient = function getBounceEJSupabaseClient() {
     return null;
   }
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
   window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey, {
     realtime: {
       params: {
@@ -21,6 +22,9 @@ window.getBounceEJSupabaseClient = function getBounceEJSupabaseClient() {
       }
     }
   });
+=======
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+>>>>>>> main
   return window.supabaseClient;
 };
 

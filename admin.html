@@ -72,7 +72,11 @@
     </div>
 </div>
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
 <script src="supabase-loader.js"></script>
+=======
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+>>>>>>> main
 <script src="supabase-config.js"></script>
 <script>
     let channel = null;
@@ -86,6 +90,7 @@
 
     setAdminEnabled(false);
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
     async function connectAdminPanel() {
         const client = typeof window.whenBounceEJSupabaseClient === 'function'
             ? await window.whenBounceEJSupabaseClient()
@@ -97,15 +102,30 @@
         }
 
         channel = client.channel('admin_control');
+=======
+    if (window.supabase && window.BOUNCE_EJ_SUPABASE) {
+        window.supabaseClient = window.supabaseClient || window.supabase.createClient(
+            window.BOUNCE_EJ_SUPABASE.url,
+            window.BOUNCE_EJ_SUPABASE.publishableKey
+        );
+
+        channel = window.supabaseClient.channel('admin_control');
+>>>>>>> main
         channel.subscribe((status) => {
             if (status === 'SUBSCRIBED') {
                 console.log("Admin Panel connected to Supabase!");
                 setAdminEnabled(true);
             }
         });
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
     }
 
     connectAdminPanel();
+=======
+    } else {
+        console.warn("Supabase SDK did not load; admin panel commands are unavailable.");
+    }
+>>>>>>> main
 
     function sendCmd(isLocked) {
         const id = document.getElementById('targetId').value.trim();

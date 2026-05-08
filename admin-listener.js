@@ -1,19 +1,39 @@
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
 (async function() {
     async function getSupabaseClient() {
         if (typeof window.whenBounceEJSupabaseClient === "function") {
             return window.whenBounceEJSupabaseClient();
         }
 
+=======
+(function() {
+    function getSupabaseClient() {
+>>>>>>> main
         if (window.supabaseClient) {
             return window.supabaseClient;
         }
 
+<<<<<<< codex/fix-errors-and-enable-admin-panel-n5edqp
         return null;
     }
 
     const client = await getSupabaseClient();
     if (!client) {
         console.warn("Supabase SDK is unavailable; admin commands are offline.");
+=======
+        const config = window.BOUNCE_EJ_SUPABASE;
+        if (!window.supabase || !config || !config.url || !config.publishableKey) {
+            console.warn("Supabase SDK is unavailable; admin commands are offline.");
+            return null;
+        }
+
+        window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+        return window.supabaseClient;
+    }
+
+    const client = getSupabaseClient();
+    if (!client) {
+>>>>>>> main
         return;
     }
 
