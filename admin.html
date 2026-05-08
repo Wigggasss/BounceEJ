@@ -72,7 +72,7 @@
     </div>
 </div>
 
-<script src="supabase-loader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="supabase-config.js"></script>
 <script>
     let channel = null;
@@ -86,26 +86,22 @@
 
     setAdminEnabled(false);
 
-    async function connectAdminPanel() {
-        const client = typeof window.whenBounceEJSupabaseClient === 'function'
-            ? await window.whenBounceEJSupabaseClient()
-            : null;
+    if (window.supabase && window.BOUNCE_EJ_SUPABASE) {
+        window.supabaseClient = window.supabaseClient || window.supabase.createClient(
+            window.BOUNCE_EJ_SUPABASE.url,
+            window.BOUNCE_EJ_SUPABASE.publishableKey
+        );
 
-        if (!client) {
-            console.warn("Supabase SDK did not load; admin panel commands are unavailable.");
-            return;
-        }
-
-        channel = client.channel('admin_control');
+        channel = window.supabaseClient.channel('admin_control');
         channel.subscribe((status) => {
             if (status === 'SUBSCRIBED') {
                 console.log("Admin Panel connected to Supabase!");
                 setAdminEnabled(true);
             }
         });
+    } else {
+        console.warn("Supabase SDK did not load; admin panel commands are unavailable.");
     }
-
-    connectAdminPanel();
 
     function sendCmd(isLocked) {
         const id = document.getElementById('targetId').value.trim();

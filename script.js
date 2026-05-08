@@ -25,9 +25,9 @@ const MULTIPLAYER_MAX_PLAYERS = 2;
 const MULTIPLAYER_STATE_INTERVAL = 0.2;
 const MULTIPLAYER_PRESENCE_INTERVAL = 0.75;
 const MULTIPLAYER_DISCONNECT_LIMIT = 15;
-const MULTIPLAYER_PRESENCE_LEAVE_GRACE = 1.5;
+const MULTIPLAYER_PRESENCE_LEAVE_GRACE = 8;
 const MULTIPLAYER_SIMULTANEOUS_WINDOW = 500;
-const MULTIPLAYER_GHOST_STALE_MS = 6500;
+const MULTIPLAYER_GHOST_STALE_MS = 30000;
 const MULTIPLAYER_ROOM_CODE_LENGTH = 5;
 const FALLBACK_CENSOR_WORDS = [
   "fuck",
@@ -434,6 +434,7 @@ const authForm = document.getElementById("authForm");
 const authEmailInput = document.getElementById("authEmailInput");
 const authPasswordInput = document.getElementById("authPasswordInput");
 const authNameInput = document.getElementById("authNameInput");
+const authForm = document.getElementById("authForm");
 const authSignInButton = document.getElementById("authSignInButton");
 const authSignUpButton = document.getElementById("authSignUpButton");
 const authSignOutButton = document.getElementById("authSignOutButton");
@@ -472,6 +473,14 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   return map;
 }, {});
 let leaderboardClient = createLeaderboardClient();
+
+function getLeaderboardClient() {
+  // Re-attempt client creation if CDN loaded after our script ran.
+  if (!leaderboardClient && window.supabase) {
+    leaderboardClient = createLeaderboardClient();
+  }
+  return leaderboardClient;
+}
 
 const authState = {
   session: null,
@@ -629,10 +638,6 @@ function saveData() {
 }
 
 function createLeaderboardClient() {
-  if (typeof window.getBounceEJSupabaseClient === "function") {
-    return window.getBounceEJSupabaseClient();
-  }
-
   if (window.supabaseClient) {
     return window.supabaseClient;
   }
@@ -643,28 +648,14 @@ function createLeaderboardClient() {
     return null;
   }
 
-  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey, {
+    realtime: {
+      params: {
+        eventsPerSecond: 40
+      }
+    }
+  });
   return window.supabaseClient;
-}
-
-function refreshLeaderboardClient() {
-  leaderboardClient = createLeaderboardClient();
-  return leaderboardClient;
-}
-
-async function waitForLeaderboardClient(timeoutMs = 12000) {
-  const currentClient = refreshLeaderboardClient();
-
-  if (currentClient) {
-    return currentClient;
-  }
-
-  if (typeof window.whenBounceEJSupabaseClient === "function") {
-    leaderboardClient = await window.whenBounceEJSupabaseClient(timeoutMs);
-    return leaderboardClient;
-  }
-
-  return null;
 }
 
 function initAuth() {
@@ -2490,7 +2481,9 @@ function createMultiplayerState() {
     result: null,
     resultTimer: null,
     startQueued: false,
-    deathTickInterval: null
+    deathTickInterval: null,
+    guestFallbackTimer: null,
+    resultRescheduleCount: 0
   };
 }
 
@@ -2625,12 +2618,14 @@ async function joinMultiplayerRoomFromInput() {
   await connectMultiplayerRoom(code, "guest");
 }
 
-async function connectMultiplayerRoom(roomCode, role) {
-  showMultiplayerStatus("Connecting to Supabase Realtime...", "");
-  const realtimeClient = await waitForLeaderboardClient();
-
-  if (!realtimeClient) {
-    showMultiplayerStatus("Supabase Realtime is still loading or blocked. Refresh and try again.", "error");
+function connectMultiplayerRoom(roomCode, role) {
+  // Retry client creation in case the Supabase CDN loaded after our script ran.
+  const client = getLeaderboardClient();
+  if (!client) {
+    const reason = window.__supabaseCdnFailed
+      ? "Could not reach Supabase CDN. Check your internet connection."
+      : "Supabase is not configured. Check supabase-config.js.";
+    showMultiplayerStatus(reason, "error");
     return;
   }
 
@@ -2643,9 +2638,12 @@ async function connectMultiplayerRoom(roomCode, role) {
   multiplayer.status = "joining";
   multiplayer.joinedAt = Date.now();
 
-  const channel = realtimeClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
+  const channel = client.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
-      broadcast: { self: true },
+      // ack: true makes broadcast wait for server acknowledgement before resolving,
+      // matching the article's RealtimeChannelConfig(ack: true) recommendation.
+      // This prevents silent message drops under load.
+      broadcast: { self: true, ack: true },
       presence: { key: multiplayer.playerId }
     }
   });
@@ -2654,6 +2652,7 @@ async function connectMultiplayerRoom(roomCode, role) {
 
   channel
     .on("presence", { event: "sync" }, syncMultiplayerPresence)
+    .on("presence", { event: "join" }, handleMultiplayerPresenceJoin)
     .on("presence", { event: "leave" }, handleMultiplayerPresenceLeave);
 
   ["room_seed", "ready_update", "start_match", "state_tick", "player_dead", "match_result", "rematch_request", "leave_match"].forEach((eventName) => {
@@ -2712,6 +2711,11 @@ function leaveMultiplayerRoom(broadcast = true) {
   if (multiplayer.deathTickInterval) {
     clearInterval(multiplayer.deathTickInterval);
     multiplayer.deathTickInterval = null;
+  }
+
+  if (multiplayer.guestFallbackTimer) {
+    clearTimeout(multiplayer.guestFallbackTimer);
+    multiplayer.guestFallbackTimer = null;
   }
 
   if (channel && leaderboardClient) {
@@ -2788,21 +2792,36 @@ function syncMultiplayerPresence() {
     return;
   }
 
+  if (game && game.onlineDuel && multiplayer.status === "playing") {
+    // During an active match, presence state is unreliable — brief reconnects or
+    // Supabase sync delays can make the opponent look absent for a moment even
+    // though they're still connected. State-ticks (receiveMultiplayerStateTick)
+    // are the authoritative liveness signal while the game is running; only
+    // update the lobby players list from presence when we're not yet playing.
+    const opponentInPresence = acceptedPlayers.find((player) => player.playerId !== multiplayer.playerId);
+    if (opponentInPresence) {
+      multiplayer.matchHadOpponent = true;
+      multiplayer.matchOpponentId = opponentInPresence.playerId;
+      // Opponent is back — clear any leave grace timer so the match continues.
+      multiplayer.opponentLeftAt = 0;
+    }
+    // Do NOT set opponentLeftAt here based on absence; let handleMultiplayerPresenceLeave
+    // and checkMultiplayerDisconnect (driven by state-tick timing) handle that.
+    return;
+  }
+
   const hadOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
   multiplayer.players = acceptedPlayers;
+
+  if (!game || !game.onlineDuel) {
+    renderMultiplayerScreen();
+    maybeStartMultiplayerMatch();
+    return;
+  }
+
   const hasOpponent = multiplayer.players.some((player) => player.playerId !== multiplayer.playerId);
-
-  if (game && game.onlineDuel && multiplayer.status === "playing") {
-    const opponent = multiplayer.players.find((player) => player.playerId !== multiplayer.playerId);
-
-    if (opponent) {
-      multiplayer.matchHadOpponent = true;
-      multiplayer.matchOpponentId = opponent.playerId;
-      multiplayer.opponentLeftAt = 0;
-      updateOpponentSnapshot(opponent);
-    } else if (hadOpponent && !multiplayer.opponentLeftAt) {
-      multiplayer.opponentLeftAt = Date.now();
-    }
+  if (!hasOpponent && hadOpponent && !multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = Date.now();
   }
 
   renderMultiplayerScreen();
@@ -2876,6 +2895,18 @@ function getAcceptedMultiplayerPlayers(players) {
   return (host ? [host, ...guests] : guests).slice(0, MULTIPLAYER_MAX_PLAYERS);
 }
 
+function handleMultiplayerPresenceJoin({ newPresences }) {
+  // When the opponent rejoins presence (e.g. after a brief network blip), clear
+  // any pending leave timer so the match is not incorrectly ended.
+  const opponentRejoined = (newPresences || []).some(
+    (presence) => presence.playerId && presence.playerId !== multiplayer.playerId
+  );
+
+  if (opponentRejoined && multiplayer.opponentLeftAt) {
+    multiplayer.opponentLeftAt = 0;
+  }
+}
+
 function handleMultiplayerPresenceLeave({ leftPresences }) {
   if (!game || !game.onlineDuel || multiplayer.status !== "playing") {
     return;
@@ -2883,8 +2914,22 @@ function handleMultiplayerPresenceLeave({ leftPresences }) {
 
   const opponentLeft = (leftPresences || []).some((presence) => presence.playerId && presence.playerId !== multiplayer.playerId);
 
-  if (opponentLeft && !multiplayer.opponentLeftAt) {
-    multiplayer.opponentLeftAt = Date.now();
+  if (!opponentLeft || multiplayer.opponentLeftAt) {
+    return;
+  }
+
+  // Presence leave fires false positives during game startup — Supabase fires
+  // them whenever track() updates propagate. Only treat it as meaningful if:
+  //   1. We are past the 5-second startup grace window, AND
+  //   2. We have already received at least one real state-tick from the opponent.
+  // Otherwise, let checkMultiplayerDisconnect (state-tick silence) be the judge.
+  const now = Date.now();
+  const STARTUP_GRACE_MS = 5000;
+  const pastStartupGrace = multiplayer.matchStartedAt && (now - multiplayer.matchStartedAt) >= STARTUP_GRACE_MS;
+  const hasSeenStateTick = multiplayer.lastOpponentStateAt > (multiplayer.matchStartedAt || 0);
+
+  if (pastStartupGrace && hasSeenStateTick) {
+    multiplayer.opponentLeftAt = now;
   }
 }
 
@@ -2939,21 +2984,56 @@ function handleMultiplayerBroadcast(eventName, payload) {
   }
 }
 
-function sendMultiplayerBroadcast(eventName, payload = {}) {
-  if (!multiplayer.channel || !multiplayer.subscribed) {
-    return Promise.resolve("offline");
+async function sendMultiplayerBroadcast(eventName, payload = {}) {
+  if (!multiplayer.channel) {
+    return "offline";
   }
 
-  return multiplayer.channel.send({
-    type: "broadcast",
-    event: eventName,
-    payload: {
-      ...payload,
-      roomCode: multiplayer.roomCode,
-      senderId: multiplayer.playerId,
-      sentAt: Date.now()
+  // During active gameplay, attempt state_tick sends even if subscribed briefly
+  // dropped to false (transient reconnect). Other event types still require
+  // a confirmed subscription so we don't spam before the room is ready.
+  const isStateTick = eventName === "state_tick";
+  if (!multiplayer.subscribed && !isStateTick) {
+    return "offline";
+  }
+
+  const fullPayload = {
+    ...payload,
+    roomCode: multiplayer.roomCode,
+    senderId: multiplayer.playerId,
+    sentAt: Date.now()
+  };
+
+  // Retry loop matching the article's pattern: if Supabase rate-limits the send,
+  // wait one animation frame and retry. Cap at 3 attempts to avoid spinning forever.
+  // State ticks are low-priority so skip retry for them — just drop and wait for next tick.
+  const maxRetries = isStateTick ? 1 : 3;
+  let attempts = 0;
+  let response;
+
+  do {
+    try {
+      response = await multiplayer.channel.send({
+        type: "broadcast",
+        event: eventName,
+        payload: fullPayload
+      });
+    } catch {
+      response = "error";
     }
-  }).catch(() => "error");
+
+    attempts++;
+
+    if (response === "rate limited" || response === "error") {
+      // Wait one frame before retrying, same as article's Future.delayed(Duration.zero)
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  } while (
+    (response === "rate limited") &&
+    attempts < maxRetries
+  );
+
+  return response;
 }
 
 function toggleMultiplayerReady() {
@@ -3058,7 +3138,11 @@ function sendMultiplayerStateTick() {
     name: getSavedLeaderboardName() || "Player",
     characterId: saveState.equippedCharacter,
     xRatio: (player.x + player.width / 2) / game.width,
+    // Send y as a score-relative offset so it's meaningful regardless of
+    // the receiver's canvas height or startY value.
     yOffset: player.y - game.startY,
+    // Also send cameraY offset so receiver can position ghost relative to their own camera.
+    cameraOffset: player.y - game.cameraY,
     size: player.width,
     score: game.score,
     alive: true,
@@ -3090,6 +3174,7 @@ function updateOpponentSnapshot(payload) {
     characterId: getCharacter(payload.characterId).id,
     xRatio: clampNumber(Number(payload.xRatio), 0, 1, multiplayer.opponent ? multiplayer.opponent.xRatio : 0.5),
     yOffset: Number.isFinite(Number(payload.yOffset)) ? Number(payload.yOffset) : (multiplayer.opponent ? multiplayer.opponent.yOffset : 0),
+    cameraOffset: Number.isFinite(Number(payload.cameraOffset)) ? Number(payload.cameraOffset) : null,
     size: clampNumber(Number(payload.size), 30, 86, multiplayer.opponent ? multiplayer.opponent.size : 48),
     score: Number(payload.score) || 0,
     alive: payload.alive !== false,
@@ -3184,9 +3269,19 @@ function resolveMultiplayerResult() {
 
   const deaths = Object.values(multiplayer.deaths);
 
+  // No deaths recorded yet — reschedule up to 10 times (~5.8s) waiting for
+  // player_dead broadcasts to arrive over the network.
   if (!deaths.length) {
+    multiplayer.resultRescheduleCount = (multiplayer.resultRescheduleCount || 0) + 1;
+    if (multiplayer.resultRescheduleCount <= 10) {
+      scheduleMultiplayerResultCheck();
+    }
+    // After 10 reschedules with no deaths, let the disconnect check take over naturally.
     return;
   }
+
+  // Reset reschedule counter once we have death data.
+  multiplayer.resultRescheduleCount = 0;
 
   let result;
 
@@ -3238,12 +3333,21 @@ function resolveMultiplayerResult() {
     }
   }
 
-  // Only the host broadcasts the authoritative result to prevent both sides
-  // sending conflicting match_result payloads and both seeing themselves as winner.
   if (multiplayer.isHost) {
-    sendMultiplayerBroadcast("match_result", result);
+    // Host is the single authority: broadcast the result then apply it locally.
+    const broadcastResult = Object.assign({}, result, { _fromHost: true });
+    sendMultiplayerBroadcast("match_result", broadcastResult);
+    finishMultiplayerMatch(broadcastResult);
+  } else {
+    // Guest waits for the host's match_result broadcast (already handled in
+    // handleMultiplayerBroadcast). Only apply locally as a last-resort fallback
+    // if the host broadcast hasn't arrived within 10 seconds.
+    multiplayer.guestFallbackTimer = window.setTimeout(() => {
+      if (!multiplayer.result) {
+        finishMultiplayerMatch(result);
+      }
+    }, 10000);
   }
-  finishMultiplayerMatch(result);
 }
 
 function getOtherMultiplayerPlayerId(playerId) {
@@ -3272,6 +3376,14 @@ function checkMultiplayerDisconnect() {
   }
 
   const now = Date.now();
+
+  // Never fire a disconnect in the first 5 seconds — state-ticks from the
+  // opponent may not have arrived yet right after game start.
+  const STARTUP_GRACE_S = 5;
+  if (multiplayer.matchStartedAt && (now - multiplayer.matchStartedAt) / 1000 < STARTUP_GRACE_S) {
+    return;
+  }
+
   const lastSeenAt = Math.max(multiplayer.lastOpponentStateAt || 0, multiplayer.matchStartedAt || 0);
 
   if (multiplayer.opponentLeftAt && multiplayer.lastOpponentStateAt > multiplayer.opponentLeftAt) {
@@ -3302,18 +3414,50 @@ function finishMultiplayerDisconnect() {
     scores: getMultiplayerScoreMap()
   };
 
-  sendMultiplayerBroadcast("match_result", result);
-  finishMultiplayerMatch(result);
+  if (multiplayer.isHost) {
+    // Host is the authority on disconnect results too — broadcast then apply.
+    const broadcastResult = Object.assign({}, result, { _fromHost: true });
+    sendMultiplayerBroadcast("match_result", broadcastResult);
+    finishMultiplayerMatch(broadcastResult);
+  } else {
+    // Guest: give the host extra time to send a result before declaring victory ourselves.
+    // If host's match_result arrives first, guestFallbackTimer is cleared and we never apply this.
+    if (!multiplayer.guestFallbackTimer) {
+      multiplayer.guestFallbackTimer = window.setTimeout(() => {
+        if (!multiplayer.result) {
+          finishMultiplayerMatch(result);
+        }
+      }, 8000);
+    }
+  }
 }
 
 function finishMultiplayerMatch(result) {
-  if (!game || !game.onlineDuel || multiplayer.result) {
+  if (!game || !game.onlineDuel) {
     return;
+  }
+
+  // The host is the single authority on match results. If the guest has already
+  // set a local result (e.g. from a race-condition fallback) but the host's
+  // broadcast now arrives with a different verdict, the host result wins.
+  const isHostBroadcast = result._fromHost === true;
+  if (multiplayer.result) {
+    if (!multiplayer.isHost && isHostBroadcast) {
+      // Override guest's locally-derived result with the authoritative host result.
+      multiplayer.result = null;
+    } else {
+      return;
+    }
   }
 
   multiplayer.result = result;
   multiplayer.status = "ended";
   clearMultiplayerResultTimer();
+
+  if (multiplayer.guestFallbackTimer) {
+    clearTimeout(multiplayer.guestFallbackTimer);
+    multiplayer.guestFallbackTimer = null;
+  }
 
   if (game.running) {
     game.running = false;
@@ -5493,9 +5637,34 @@ function drawOpponentGhost() {
   const character = getCharacter(opponent.characterId);
   const image = characterImages[character.id];
   const size = opponent.size || 48;
-  const centerX = opponent.xRatio * game.width;
-  const worldY = game.startY + opponent.yOffset;
-  const screenY = worldY - game.cameraY;
+  const targetX = opponent.xRatio * game.width;
+
+  // Interpolate X position smoothly between ticks too.
+  if (!opponent.renderX) {
+    opponent.renderX = targetX;
+  } else {
+    opponent.renderX += (targetX - opponent.renderX) * 0.3;
+  }
+  const centerX = opponent.renderX;
+
+  // cameraOffset = player.y - cameraY on the SENDER's screen = their screen-space Y.
+  // Rendering it directly as screenY means the ghost appears at the same vertical
+  // position on our screen as the opponent occupies on theirs — correct for a seeded
+  // game where both players share the same platform layout.
+  // Interpolate toward the latest received position for smoothness between ticks.
+  const targetScreenY = Number.isFinite(opponent.cameraOffset)
+    ? opponent.cameraOffset
+    : (game.startY + opponent.yOffset) - game.cameraY;
+
+  // Smoothly lerp the rendered position toward the network target each frame.
+  if (!opponent.renderY || Math.abs(opponent.renderY - targetScreenY) > game.height) {
+    // Snap on first draw or large discontinuity (respawn/teleport).
+    opponent.renderY = targetScreenY;
+  } else {
+    opponent.renderY += (targetScreenY - opponent.renderY) * 0.3;
+  }
+
+  const screenY = opponent.renderY;
   const drawX = centerX - size / 2;
 
   if (screenY < -120 || screenY > game.height + 120) {

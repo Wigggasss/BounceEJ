@@ -327,9 +327,19 @@
     </div>
   </section>
 
-  <!-- 1. Supabase SDK loader and config (game scripts lazily wait for the SDK when needed) -->
-  <script src="supabase-loader.js"></script>
+  <!-- 1. Supabase SDK and config (must load before scripts that use Supabase) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="supabase-config.js"></script>
+  <script>
+    if (window.supabase && window.BOUNCE_EJ_SUPABASE) {
+      window.supabaseClient = window.supabaseClient || window.supabase.createClient(
+        window.BOUNCE_EJ_SUPABASE.url,
+        window.BOUNCE_EJ_SUPABASE.publishableKey
+      );
+    } else {
+      console.warn("Supabase SDK did not load; online features are unavailable.");
+    }
+  </script>
 
   <!-- 2. Game files -->
   <script src="characters.js"></script>
