@@ -372,6 +372,7 @@ const authOpenButton = document.getElementById("authOpenButton");
 const authOverlay = document.getElementById("authOverlay");
 const authCloseButton = document.getElementById("authCloseButton");
 const authAccountSummary = document.getElementById("authAccountSummary");
+const authForm = document.getElementById("authForm");
 const authEmailInput = document.getElementById("authEmailInput");
 const authPasswordInput = document.getElementById("authPasswordInput");
 const authNameInput = document.getElementById("authNameInput");
@@ -405,7 +406,7 @@ const powerupById = powerupDefinitions.reduce((map, powerup) => {
   map[powerup.id] = powerup;
   return map;
 }, {});
-const leaderboardClient = createLeaderboardClient();
+let leaderboardClient = createLeaderboardClient();
 
 const authState = {
   session: null,
@@ -555,13 +556,42 @@ function saveData() {
 }
 
 function createLeaderboardClient() {
+  if (typeof window.getBounceEJSupabaseClient === "function") {
+    return window.getBounceEJSupabaseClient();
+  }
+
+  if (window.supabaseClient) {
+    return window.supabaseClient;
+  }
+
   const config = window.BOUNCE_EJ_SUPABASE;
 
-  if (!window.supabase || !config || !config.url || !config.publishableKey) {
+  if (!window.supabase || typeof window.supabase.createClient !== "function" || !config || !config.url || !config.publishableKey) {
     return null;
   }
 
-  return window.supabase.createClient(config.url, config.publishableKey);
+  window.supabaseClient = window.supabase.createClient(config.url, config.publishableKey);
+  return window.supabaseClient;
+}
+
+function refreshLeaderboardClient() {
+  leaderboardClient = createLeaderboardClient();
+  return leaderboardClient;
+}
+
+async function waitForLeaderboardClient(timeoutMs = 12000) {
+  const currentClient = refreshLeaderboardClient();
+
+  if (currentClient) {
+    return currentClient;
+  }
+
+  if (typeof window.whenBounceEJSupabaseClient === "function") {
+    leaderboardClient = await window.whenBounceEJSupabaseClient(timeoutMs);
+    return leaderboardClient;
+  }
+
+  return null;
 }
 
 function initAuth() {
@@ -2505,11 +2535,11 @@ function updateMultiplayerLobbyText() {
   showMultiplayerStatus("Waiting on ready checks.", "");
 }
 
-function createMultiplayerRoom() {
-  connectMultiplayerRoom(createRoomCode(), "host");
+async function createMultiplayerRoom() {
+  await connectMultiplayerRoom(createRoomCode(), "host");
 }
 
-function joinMultiplayerRoomFromInput() {
+async function joinMultiplayerRoomFromInput() {
   const code = sanitizeRoomCode(joinRoomInput.value);
   joinRoomInput.value = code;
 
@@ -2518,12 +2548,15 @@ function joinMultiplayerRoomFromInput() {
     return;
   }
 
-  connectMultiplayerRoom(code, "guest");
+  await connectMultiplayerRoom(code, "guest");
 }
 
-function connectMultiplayerRoom(roomCode, role) {
-  if (!leaderboardClient) {
-    showMultiplayerStatus("Supabase Realtime is offline.", "error");
+async function connectMultiplayerRoom(roomCode, role) {
+  showMultiplayerStatus("Connecting to Supabase Realtime...", "");
+  const realtimeClient = await waitForLeaderboardClient();
+
+  if (!realtimeClient) {
+    showMultiplayerStatus("Supabase Realtime is still loading or blocked. Refresh and try again.", "error");
     return;
   }
 
@@ -2536,7 +2569,7 @@ function connectMultiplayerRoom(roomCode, role) {
   multiplayer.status = "joining";
   multiplayer.joinedAt = Date.now();
 
-  const channel = leaderboardClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
+  const channel = realtimeClient.channel(`${MULTIPLAYER_CHANNEL_PREFIX}${multiplayer.roomCode}`, {
     config: {
       broadcast: { self: true },
       presence: { key: multiplayer.playerId }
@@ -5407,6 +5440,9 @@ authOverlay.addEventListener("click", (event) => {
     hideAuthOverlay();
   }
 });
+authForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+});
 authSignInButton.addEventListener("click", signInAccount);
 authSignUpButton.addEventListener("click", signUpAccount);
 authSignOutButton.addEventListener("click", signOutAccount);
@@ -5460,6 +5496,15 @@ loadCharacterImages();
 loadBackgroundAdImages();
 loadData();
 initAuth();
+if (!leaderboardClient && window.BounceEJSupabaseReady) {
+  window.BounceEJSupabaseReady.then(() => {
+    if (refreshLeaderboardClient()) {
+      initAuth();
+      updateAuthUi();
+      loadLeaderboard();
+    }
+  });
+}
 showMenu();
 
 // ============================================
